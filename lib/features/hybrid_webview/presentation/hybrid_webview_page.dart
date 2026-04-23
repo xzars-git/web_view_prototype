@@ -4,6 +4,8 @@ import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../config/custom_tabs_config.dart';
+import '../application/web_permission_service.dart';
+import '../domain/web_navigation_guard.dart';
 
 enum _StartupPermissionState { requesting, ready, permanentlyDenied }
 
@@ -34,9 +36,13 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
   static const String _statusPaymentOpenSuccess =
       'Halaman payment dibuka di Custom Tabs. Tutup tab untuk kembali ke WebView.';
   static const String _statusPaymentOpenFailed = 'Gagal membuka halaman payment di Custom Tabs.';
+  static const String _statusNavigationBlocked =
+      'Navigasi diblokir karena URL tidak ada di allowlist.';
 
   InAppWebViewController? _controller;
   late String _selectedEnvironment;
+  final WebPermissionService _permissionService = WebPermissionService();
+  final WebNavigationGuard _navigationGuard = const WebNavigationGuard();
 
   String _status = _statusRequestingPermissions;
   double _progress = 0;
@@ -47,7 +53,9 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
   void initState() {
     super.initState();
     _selectedEnvironment = CustomTabsConfig.normalizeEnvironment(widget.initialEnvironment);
-    _requestStartupPermissions();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _requestStartupPermissions();
+    });
   }
 
   String get _effectiveWebViewUrl {
@@ -74,6 +82,17 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     });
   }
 
+  void _logError(String context, Object error, StackTrace stackTrace) {
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: error,
+        stack: stackTrace,
+        library: 'hybrid_webview',
+        context: ErrorDescription(context),
+      ),
+    );
+  }
+
   Future<void> _openInCustomTabs(String rawUrl) async {
     final uri = Uri.tryParse(rawUrl);
     if (uri == null) {
@@ -84,14 +103,16 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     bool opened = false;
     try {
       opened = await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
-    } catch (_) {
+    } catch (error, stackTrace) {
+      _logError('open payment in custom tab', error, stackTrace);
       opened = false;
     }
 
     if (!opened) {
       try {
         opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      } catch (_) {
+      } catch (error, stackTrace) {
+        _logError('open payment in external application', error, stackTrace);
         opened = false;
       }
     }
@@ -100,7 +121,18 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
   }
 
   Future<void> _reloadBasePage() async {
-    await _controller?.loadUrl(urlRequest: URLRequest(url: WebUri(_effectiveWebViewUrl)));
+    if (_controller == null) {
+      _updateStatus('WebView belum siap. Memuat ulang dibatalkan.');
+      return;
+    }
+
+    final uri = Uri.tryParse(_effectiveWebViewUrl);
+    if (uri == null) {
+      _updateStatus('URL tidak valid: $_effectiveWebViewUrl');
+      return;
+    }
+
+    await _controller?.loadUrl(urlRequest: URLRequest(url: WebUri.uri(uri)));
     _updateStatus('Memuat ulang halaman utama di WebView.');
   }
 
@@ -113,26 +145,28 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     });
 
     try {
-      final results = await Future.wait([
-        ph.Permission.camera.request(),
-        ph.Permission.locationWhenInUse.request(),
-      ]);
-      final cameraStatus = results[0];
-      final locationStatus = results[1];
+      final outcome = await _permissionService.requestStartupPermissions();
 
       if (!mounted) return;
       setState(() {
-        if (cameraStatus.isPermanentlyDenied || locationStatus.isPermanentlyDenied) {
+        if (outcome == StartupPermissionOutcome.permanentlyDenied) {
           _permissionState = _StartupPermissionState.permanentlyDenied;
           _hasPermissionIssue = true;
           _status = _statusPermissionPermanentlyDenied;
           return;
         }
 
-        if (cameraStatus.isDenied || locationStatus.isDenied) {
+        if (outcome == StartupPermissionOutcome.denied) {
           _permissionState = _StartupPermissionState.ready;
           _hasPermissionIssue = true;
           _status = _statusPermissionDenied;
+          return;
+        }
+
+        if (outcome == StartupPermissionOutcome.failed) {
+          _permissionState = _StartupPermissionState.ready;
+          _hasPermissionIssue = true;
+          _status = _statusPermissionRequestFailed;
           return;
         }
 
@@ -140,7 +174,8 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
         _hasPermissionIssue = false;
         _status = _statusWebViewActive;
       });
-    } catch (_) {
+    } catch (error, stackTrace) {
+      _logError('request startup permissions', error, stackTrace);
       if (!mounted) return;
       setState(() {
         _permissionState = _StartupPermissionState.ready;
@@ -150,86 +185,55 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     }
   }
 
-  Future<bool> _isLocationReadyForWeb() async {
-    final permission = await ph.Permission.locationWhenInUse.status;
-    if (!permission.isGranted) {
-      return false;
-    }
-
-    final serviceStatus = await ph.Permission.locationWhenInUse.serviceStatus;
-    return serviceStatus == ph.ServiceStatus.enabled;
-  }
-
-  bool _requestNeedsCamera(List<PermissionResourceType> resources) {
-    return resources.any((resource) => resource.toString().toLowerCase().contains('video'));
-  }
-
-  bool _requestNeedsMicrophone(List<PermissionResourceType> resources) {
-    return resources.any((resource) => resource.toString().toLowerCase().contains('audio'));
-  }
-
   Future<PermissionResponse> _handleWebPermissionRequest(PermissionRequest request) async {
-    var isGranted = true;
-    var hasPermanentDenial = false;
-
-    if (_requestNeedsCamera(request.resources)) {
-      final cameraStatus = await ph.Permission.camera.request();
-      isGranted = isGranted && cameraStatus.isGranted;
-      hasPermanentDenial = hasPermanentDenial || cameraStatus.isPermanentlyDenied;
-    }
-
-    if (_requestNeedsMicrophone(request.resources)) {
-      final microphoneStatus = await ph.Permission.microphone.request();
-      isGranted = isGranted && microphoneStatus.isGranted;
-      hasPermanentDenial = hasPermanentDenial || microphoneStatus.isPermanentlyDenied;
-    }
-
-    if (!isGranted) {
-      if (mounted) {
-        setState(() {
-          _hasPermissionIssue = true;
-          if (hasPermanentDenial) {
-            _permissionState = _StartupPermissionState.permanentlyDenied;
-          }
-        });
+    try {
+      final decision = await _permissionService.handleWebPermissionRequest(request);
+      if (!decision.granted) {
+        if (mounted) {
+          setState(() {
+            _hasPermissionIssue = true;
+            if (decision.permanentlyDenied) {
+              _permissionState = _StartupPermissionState.permanentlyDenied;
+            }
+          });
+        }
+        _updateStatus(_statusWebPermissionDenied);
       }
-      _updateStatus(_statusWebPermissionDenied);
+      return decision.response;
+    } catch (error, stackTrace) {
+      _logError('web permission request', error, stackTrace);
+      return PermissionResponse(
+        resources: request.resources,
+        action: PermissionResponseAction.DENY,
+      );
     }
-
-    return PermissionResponse(
-      resources: request.resources,
-      action: isGranted ? PermissionResponseAction.GRANT : PermissionResponseAction.DENY,
-    );
   }
 
   Future<GeolocationPermissionShowPromptResponse> _handleGeolocationPrompt(String origin) async {
-    var isReady = await _isLocationReadyForWeb();
-
-    if (!isReady) {
-      final requestStatus = await ph.Permission.locationWhenInUse.request();
-      isReady = requestStatus.isGranted && await _isLocationReadyForWeb();
-    }
-
-    if (!isReady) {
-      final serviceStatus = await ph.Permission.locationWhenInUse.serviceStatus;
-      if (serviceStatus != ph.ServiceStatus.enabled) {
+    try {
+      final decision = await _permissionService.handleGeolocationPrompt(origin);
+      if (!decision.response.allow) {
         if (mounted) {
           setState(() {
             _hasPermissionIssue = true;
           });
         }
-        _updateStatus(_statusLocationServiceDisabled);
-      } else {
-        if (mounted) {
-          setState(() {
-            _hasPermissionIssue = true;
-          });
+
+        if (!decision.locationServiceEnabled) {
+          _updateStatus(_statusLocationServiceDisabled);
+        } else {
+          _updateStatus(_statusPermissionDenied);
         }
-        _updateStatus(_statusPermissionDenied);
       }
+      return decision.response;
+    } catch (error, stackTrace) {
+      _logError('geolocation prompt', error, stackTrace);
+      return GeolocationPermissionShowPromptResponse(
+        origin: origin,
+        allow: false,
+        retain: false,
+      );
     }
-
-    return GeolocationPermissionShowPromptResponse(origin: origin, allow: isReady, retain: true);
   }
 
   Future<void> _openAppSettings() async {
@@ -240,10 +244,20 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     final nextEnvironment = useProd ? CustomTabsConfig.prodEnv : CustomTabsConfig.devEnv;
     setState(() {
       _selectedEnvironment = nextEnvironment;
-      _status = CustomTabsConfig.isTargetUrlOverridden
-          ? 'TARGET_URL override aktif, switcher tidak mengubah URL target.'
-          : 'Environment diubah ke $_selectedEnvironment. Memuat ulang WebView...';
     });
+
+    if (_controller == null) {
+      _updateStatus(
+        'Environment diubah ke $_selectedEnvironment. WebView akan memuat URL ini saat siap.',
+      );
+      return;
+    }
+
+    _updateStatus(
+      CustomTabsConfig.isTargetUrlOverridden
+          ? 'TARGET_URL override aktif, switcher tidak mengubah URL target.'
+          : 'Environment diubah ke $_selectedEnvironment. Memuat ulang WebView...',
+    );
     _reloadBasePage();
   }
 
@@ -319,12 +333,14 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                         shouldOverrideUrlLoading: (controller, navigationAction) async {
                           final uri = navigationAction.request.url;
                           final rawUrl = uri?.toString() ?? '';
-                          if (rawUrl.isEmpty) {
-                            return NavigationActionPolicy.ALLOW;
+                          final handling = _navigationGuard.evaluate(rawUrl);
+                          if (handling == NavigationHandling.openInCustomTabs) {
+                            await _openInCustomTabs(rawUrl);
+                            return NavigationActionPolicy.CANCEL;
                           }
 
-                          if (CustomTabsConfig.shouldOpenInCustomTabs(rawUrl)) {
-                            await _openInCustomTabs(rawUrl);
+                          if (handling == NavigationHandling.block) {
+                            _updateStatus(_statusNavigationBlocked);
                             return NavigationActionPolicy.CANCEL;
                           }
 

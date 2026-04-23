@@ -4,17 +4,32 @@ class CustomTabsConfig {
   static const String devEnv = 'dev';
   static const String prodEnv = 'prod';
 
-  static const String _devUrl =
-      'http://10.44.121.12:4001/beranda?data=pS9LkaUVso4Yv6eYOXzwR0-rwph4axBtM2vvcwBQ0Yu93rqVgUKh8zX_rQqqjh_gQTQiWqZeBbcyyNuj07T5tGBsLEkXf8mkRv3v5JfkTRzBKQJO4t_ZNQTjc7ZNWti1sTIMSuslp0sUuVzxs5fg6jZvXQYo1AFmySMk3OP_HYCZ35bIoDhnTwb_k5WaMiJvrIr_jhLhBcunr45uq94EJXMTeeah3LVcOQ7b1Z0SDTuusf9IfZwi6qxHqT_6m4crQ7s1ubJry7_bIPzPQ3XctmpupkQgUhxOqAAfuhVHwTY';
+  static const String _devBaseUrl = String.fromEnvironment(
+    'DEV_BASE_URL',
+    defaultValue: 'https://example.invalid/beranda',
+  );
 
-  static const String _prodUrl =
-      'https://sambarav2.vercel.app/beranda?data=pS9LkaUVso4Yv6eYOXzwR0-rwph4axBtM2vvcwBQ0Yu93rqVgUKh8zX_rQqqjh_gQTQiWqZeBbcyyNuj07T5tGBsLEkXf8mkRv3v5JfkTRzBKQJO4t_ZNQTjc7ZNWti1sTIMSuslp0sUuVzxs5fg6jZvXQYo1AFmySMk3OP_HYCZ35bIoDhnTwb_k5WaMiJvrIr_jhLhBcunr45uq94EJXMTeeah3LVcOQ7b1Z0SDTuusf9IfZwi6qxHqT_6m4crQ7s1ubJry7_bIPzPQ3XctmpupkQgUhxOqAAfuhVHwTY';
+  static const String _prodBaseUrl = String.fromEnvironment(
+    'PROD_BASE_URL',
+    defaultValue: 'https://sambarav2.vercel.app/beranda',
+  );
+
+  static const String _targetDataToken = String.fromEnvironment(
+    'TARGET_DATA_TOKEN',
+    defaultValue: '',
+  );
 
   // If this list is empty, any host is allowed.
   static const List<String> _customTabAllowedHosts = ['m.dana.id'];
 
   // Keywords used to decide which WebView pages must open in Custom Tabs.
   static const List<String> _customTabPathKeywords = ['/n/ipg/new/inputphone'];
+
+  static const List<String> _webViewAllowedHosts = [
+    '10.44.121.12',
+    'sambarav2.vercel.app',
+    'm.dana.id',
+  ];
 
   // Supported values: dev, prod
   static const String _rawEnv = String.fromEnvironment('APP_ENV', defaultValue: devEnv);
@@ -35,11 +50,24 @@ class CustomTabsConfig {
   static String urlForEnvironment(String environment) {
     switch (normalizeEnvironment(environment)) {
       case prodEnv:
-        return _prodUrl;
+        return _buildUrlWithOptionalToken(_prodBaseUrl);
       case devEnv:
       default:
-        return _devUrl;
+        return _buildUrlWithOptionalToken(_devBaseUrl);
     }
+  }
+
+  static String _buildUrlWithOptionalToken(String rawUrl) {
+    final trimmed = rawUrl.trim();
+    final token = _targetDataToken.trim();
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null || token.isEmpty) {
+      return trimmed;
+    }
+
+    final nextQuery = Map<String, String>.from(uri.queryParameters);
+    nextQuery['data'] = token;
+    return uri.replace(queryParameters: nextQuery).toString();
   }
 
   static String get targetUrl {
@@ -60,6 +88,10 @@ class CustomTabsConfig {
       return false;
     }
 
+    if (uri.scheme.toLowerCase() != 'https') {
+      return false;
+    }
+
     if (_customTabAllowedHosts.isNotEmpty) {
       final currentHost = uri.host.toLowerCase();
       final hostMatched = _customTabAllowedHosts.any(
@@ -74,5 +106,31 @@ class CustomTabsConfig {
     return _customTabPathKeywords.any(
       (keyword) => fingerprint.contains(keyword.trim().toLowerCase()),
     );
+  }
+
+  static bool isWebViewNavigationAllowed(String rawUrl) {
+    final uri = Uri.tryParse(rawUrl);
+    if (uri == null) {
+      return false;
+    }
+
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme == 'about') {
+      return uri.toString().toLowerCase() == 'about:blank';
+    }
+
+    if (scheme != 'http' && scheme != 'https') {
+      return false;
+    }
+
+    final host = uri.host.trim().toLowerCase();
+    if (host.isEmpty) {
+      return false;
+    }
+
+    return _webViewAllowedHosts.any((allowed) {
+      final normalizedAllowed = allowed.trim().toLowerCase();
+      return host == normalizedAllowed || host.endsWith('.$normalizedAllowed');
+    });
   }
 }
