@@ -1,20 +1,22 @@
-import '../../../config/custom_tabs_config.dart';
+import '../../../config/app_config.dart';
 
 enum NavigationHandling { allowWebView, openInCustomTabs, block }
 
 class WebNavigationGuard {
-  const WebNavigationGuard();
+  final AppConfig _config;
+
+  const WebNavigationGuard({required AppConfig config}) : _config = config;
 
   NavigationHandling evaluate(String rawUrl) {
     if (rawUrl.isEmpty) {
       return NavigationHandling.allowWebView;
     }
 
-    if (CustomTabsConfig.shouldOpenInCustomTabs(rawUrl)) {
+    if (_config.shouldOpenInCustomTabs(rawUrl)) {
       return NavigationHandling.openInCustomTabs;
     }
 
-    if (!CustomTabsConfig.isWebViewNavigationAllowed(rawUrl)) {
+    if (!_config.isWebViewNavigationAllowed(rawUrl)) {
       return NavigationHandling.block;
     }
 
