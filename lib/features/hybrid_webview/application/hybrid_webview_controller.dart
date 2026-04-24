@@ -17,7 +17,7 @@ class HybridWebViewState {
   final bool hasPermissionIssue;
   final bool cameraGranted;
   final bool locationGranted;
-  final List<String> logs; // Untuk Debug Tracker
+  final List<String> logs;
 
   const HybridWebViewState({
     required this.status,
@@ -180,15 +180,10 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
     _addLog("[Nav] ${handling.name.toUpperCase()} -> $rawUrl");
 
-    if (handling == NavigationHandling.openInCustomTabs) {
-      _addLog("[Nav] Intercepting for CustomTabs...");
-      // Hentikan loading secara eksplisit agar WebView tidak "nyangkut"
-      webViewController?.stopLoading();
-      unawaited(_openInCustomTabs(rawUrl));
-      return NavigationActionPolicy.CANCEL;
-    }
-
     if (handling == NavigationHandling.block) {
+      // Jika navigasi diblokir (bukan host aplikasi),
+      // kita asumsi sisi Web lupa kirim via Bridge, tapi kita blokir demi keamanan.
+      _addLog("[Guard] Blocked navigation to external host: $rawUrl");
       return NavigationActionPolicy.CANCEL;
     }
 
@@ -204,7 +199,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       return;
     }
 
-    _addLog("[CustomTabs] Launching: ${uri.host}");
+    _addLog("[Bridge] Triggering CustomTabs for: ${uri.host}");
     try {
       bool opened = await launchUrl(
         uri,
@@ -213,20 +208,20 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       );
 
       if (!opened) {
-        _addLog("[CustomTabs] Failed, trying External App...");
+        _addLog("[Bridge] Failed CustomTabs, trying External App...");
         opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
       }
 
-      _addLog("[CustomTabs] Success: $opened");
+      _addLog("[Bridge] Result: $opened");
     } catch (e) {
-      _addLog("[CustomTabs Exception] $e");
+      _addLog("[Bridge Exception] $e");
     }
   }
 
   void handleWebMessage(WebMessage? message) {
     if (message != null && message.data != null) {
       final url = message.data.toString();
-      _addLog("[WebMessage] Data: $url");
+      _addLog("[Bridge] Received URL from Web: $url");
       _openInCustomTabs(url);
     }
   }

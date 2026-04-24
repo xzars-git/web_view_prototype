@@ -14,16 +14,9 @@ void main() {
       );
     });
 
-    test('evaluate handles custom tabs URLs', () {
+    test('evaluate blocks external URLs', () {
       expect(
-        guard.evaluate('https://m.dana.id/n/ipg/new/inputphone'),
-        NavigationHandling.openInCustomTabs,
-      );
-    });
-
-    test('evaluate handles blocked URLs', () {
-      expect(
-        guard.evaluate('https://unknown-domain.com'),
+        guard.evaluate('https://m.dana.id'),
         NavigationHandling.block,
       );
     });

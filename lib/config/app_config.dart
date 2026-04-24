@@ -6,7 +6,6 @@ abstract class AppConfig {
 
   String normalizeEnvironment(String rawValue);
   String urlForEnvironment(String environment);
-  bool shouldOpenInCustomTabs(String rawUrl);
   bool isWebViewNavigationAllowed(String rawUrl);
 }
 
@@ -27,30 +26,19 @@ class DefaultAppConfig implements AppConfig {
         'pS9LkaUVso4Yv6eYOXzwR0-rwph4axBtM2vvcwBQ0Yu93rqVgUKh8zX_rQqqjh_gQTQiWqZeBbcyyNuj07T5tGBsLEkXf8mkRv3v5JfkTRzBKQJO4t_ZNQTjc7ZNWti1sTIMSuslp0sUuVzxs5fg6jZvXQYo1AFmySMk3OP_HYCZ35bIoDhnTwb_k5WaMiJvrIr_jhLhBcunr45uq94EJXMTeeah3LVcOQ7b1Z0SDTuusf9IfZwi6qxHqT_6m4crQ7s1ubJry7_bIPzPQ3XctmpupkQgUhxOqAAfuhVHwTY',
   );
 
-  static const List<String> _customTabAllowedHosts = [
-    'm.dana.id',
-    'api-hk.m.dana.id',
-    'm.dana.id.link'
-  ];
-  static const List<String> _customTabPathKeywords = [
-    '/n/cashier/new/checkout',
-    '/n/ipg/new/inputphone',
-    '/n/ipg/new/payment'
-  ];
-  static const List<String> _webViewAllowedHosts = [
-    '10.44.121.12',
-    'sambarav2.vercel.app',
-    'm.dana.id',
-    'api-hk.m.dana.id'
-  ];
+  // Daftar host utama aplikasi disuntikkan via environment variable (comma separated)
+  static const String _allowedHostsEnv = String.fromEnvironment(
+    'WEBVIEW_ALLOWED_HOSTS',
+    defaultValue: '10.44.121.12,sambarav2.vercel.app',
+  );
 
-  static const String _rawEnv = String.fromEnvironment('APP_ENV', defaultValue: 'prod');
+  List<String> get _webViewAllowedHosts =>
+      _allowedHostsEnv.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+
   static const String _targetUrlOverride = String.fromEnvironment('TARGET_URL', defaultValue: '');
 
   @override
-  String normalizeEnvironment(String rawValue) {
-    return prodEnv; // Always return prod
-  }
+  String normalizeEnvironment(String rawValue) => prodEnv;
 
   @override
   String get currentEnvironment => prodEnv;
@@ -67,39 +55,17 @@ class DefaultAppConfig implements AppConfig {
   }
 
   @override
-  String urlForEnvironment(String environment) {
-    return _buildUrlWithOptionalToken(_prodBaseUrl);
-  }
+  String urlForEnvironment(String environment) => _buildUrlWithOptionalToken(_prodBaseUrl);
 
   String _buildUrlWithOptionalToken(String rawUrl) {
     final trimmed = rawUrl.trim();
     final token = _targetDataToken.trim();
     final uri = Uri.tryParse(trimmed);
-    if (uri == null || token.isEmpty) {
-      return trimmed;
-    }
+    if (uri == null || token.isEmpty) return trimmed;
 
     final nextQuery = Map<String, String>.from(uri.queryParameters);
     nextQuery['data'] = token;
     return uri.replace(queryParameters: nextQuery).toString();
-  }
-
-  @override
-  bool shouldOpenInCustomTabs(String rawUrl) {
-    final uri = Uri.tryParse(rawUrl);
-    if (uri == null) return false;
-    
-    final host = uri.host.toLowerCase();
-    
-    // Jika host adalah DANA, langsung buka di Custom Tabs
-    if (host.contains('dana.id')) {
-      return true;
-    }
-
-    if (uri.scheme.toLowerCase() != 'https') return false;
-
-    final fingerprint = '${uri.path.toLowerCase()}?${uri.query.toLowerCase()}';
-    return _customTabPathKeywords.any((keyword) => fingerprint.contains(keyword.toLowerCase()));
   }
 
   @override

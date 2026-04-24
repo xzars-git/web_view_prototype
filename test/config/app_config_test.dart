@@ -11,14 +11,11 @@ void main() {
 
     test('isWebViewNavigationAllowed handles valid domains', () {
       expect(config.isWebViewNavigationAllowed('https://sambarav2.vercel.app'), true);
-      expect(config.isWebViewNavigationAllowed('https://m.dana.id'), true);
+      expect(config.isWebViewNavigationAllowed('https://10.44.121.12'), true);
     });
 
-    test('shouldOpenInCustomTabs detects payment URLs', () {
-      expect(
-        config.shouldOpenInCustomTabs('https://m.dana.id/n/ipg/new/inputphone'),
-        true,
-      );
+    test('isWebViewNavigationAllowed blocks external domains', () {
+      expect(config.isWebViewNavigationAllowed('https://m.dana.id'), false);
     });
   });
 }

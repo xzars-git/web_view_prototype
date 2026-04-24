@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'package:permission_handler/permission_handler.dart' as ph;
 
 import '../../../config/app_config.dart';
 import '../application/hybrid_webview_controller.dart';
+import 'widgets/debug_tracker_overlay.dart';
+import 'widgets/permission_chip.dart';
 
 class HybridWebViewPage extends StatefulWidget {
   const HybridWebViewPage({
@@ -38,24 +39,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     super.dispose();
   }
 
-  Future<void> _openAppSettings() async {
-    await ph.openAppSettings();
-  }
-
-  Widget _buildPermissionChip(String label, bool granted) {
-    return Chip(
-      avatar: Icon(
-        granted ? Icons.check_circle : Icons.cancel,
-        color: granted ? Colors.green : Colors.red,
-        size: 14,
-      ),
-      label: Text(label, style: const TextStyle(fontSize: 10)),
-      backgroundColor: granted ? Colors.green.withOpacity(0.1) : Colors.red.withOpacity(0.1),
-      visualDensity: VisualDensity.compact,
-      padding: EdgeInsets.zero,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<HybridWebViewState>(
@@ -82,9 +65,9 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                 child: Row(
                   children: [
-                    _buildPermissionChip('Cam', state.cameraGranted),
+                    PermissionChip(label: 'Cam', granted: state.cameraGranted),
                     const SizedBox(width: 4),
-                    _buildPermissionChip('Loc', state.locationGranted),
+                    PermissionChip(label: 'Loc', granted: state.locationGranted),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -116,7 +99,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                             onWebViewCreated: (controller) {
                               _controller.webViewController = controller;
                               
-                              // Dummy handler untuk inisialisasi bridge flutter_inappwebview
                               controller.addJavaScriptHandler(
                                 handlerName: 'initBridge',
                                 callback: (args) => {},
@@ -152,42 +134,7 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                         ],
                       ),
               ),
-              if (_showDebug)
-                Container(
-                  height: 150,
-                  color: Colors.black.withOpacity(0.85),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        color: Colors.grey[800],
-                        child: const Row(
-                          children: [
-                            Icon(Icons.terminal, color: Colors.white, size: 14),
-                            SizedBox(width: 4),
-                            Text("DEBUG TRACKER", style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: ListView.builder(
-                          padding: const EdgeInsets.all(4),
-                          itemCount: state.logs.length,
-                          itemBuilder: (context, index) {
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 2),
-                              child: Text(
-                                state.logs[index],
-                                style: const TextStyle(color: Colors.greenAccent, fontSize: 9, fontFamily: 'monospace'),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+              if (_showDebug) DebugTrackerOverlay(logs: state.logs),
             ],
           ),
         );
