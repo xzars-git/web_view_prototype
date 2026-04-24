@@ -116,25 +116,30 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     _linkSubscription = _appLinks.uriLinkStream.listen((uri) async {
       _addLog("[DeepLink] Received: $uri");
       
-      // Menangani callback pembayaran kembali ke aplikasi.
+      // Menangani callback pembayaran kembali ke aplikasi secara aman.
+      // Kita mengecek scheme, host, dan memastikan path diawali dengan 
+      // kata kunci yang kita kenali (seperti return atau callback).
       if (uri.scheme == 'pocapp' && uri.host == 'payment') {
-        updateStatus('Pembayaran selesai!');
+        final path = uri.path.toLowerCase();
+        final isReturnPath = path.contains('return') || path.contains('callback');
 
-        // TUTUP OTOMATIS: Jika Custom Tab masih terbuka, tutup secara paksa.
-        // Ini mengatasi masalah "Zombie Tab" yang tertinggal setelah pembayaran.
-        if (await _browser.isOpened()) {
-          _addLog("[DeepLink] Closing Custom Tab...");
-          await _browser.close();
+        if (isReturnPath) {
+          _addLog("[DeepLink] Valid payment return path detected: $path");
+          updateStatus('Pembayaran selesai!');
+
+          // TUTUP OTOMATIS: Jika Custom Tab masih terbuka, tutup secara paksa.
+          if (_browser.isOpened()) {
+            _addLog("[DeepLink] Closing Custom Tab...");
+            await _browser.close();
+          }
+
+          // Mengirimkan event ke JavaScript di dalam WebView.
+          webViewController?.evaluateJavascript(
+            source: "window.dispatchEvent(new Event('paymentCompleted'));",
+          );
+        } else {
+          _addLog("[DeepLink Warning] Ignored unknown path: $path");
         }
-        
-        // Mengirimkan event ke JavaScript di dalam WebView.
-        webViewController
-            ?.evaluateJavascript(
-              source: "window.dispatchEvent(new Event('paymentCompleted'));",
-            )
-            .catchError((e) {
-          _addLog("[JS Error] $e");
-        });
       }
     });
   }
