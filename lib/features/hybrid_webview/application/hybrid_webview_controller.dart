@@ -97,6 +97,10 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   late AppLinks _appLinks;
   StreamSubscription<Uri>? _linkSubscription;
 
+  /// Instance browser untuk Chrome Custom Tabs (Android) atau SFSafariViewController (iOS).
+  /// Digunakan agar kita bisa menutup browser secara programatik.
+  final ChromeSafariBrowser _browser = ChromeSafariBrowser();
+
   /// Mencatat pesan ke dalam riwayat log Debug Tracker.
   void _addLog(String message) {
     if (kReleaseMode) return;
@@ -109,17 +113,24 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   /// Menginisialisasi pendengar Deep Link (pocapp://).
   void _initDeepLinks() {
     _appLinks = AppLinks();
-    _linkSubscription = _appLinks.uriLinkStream.listen((uri) {
+    _linkSubscription = _appLinks.uriLinkStream.listen((uri) async {
       _addLog("[DeepLink] Received: $uri");
       
       // Menangani callback pembayaran kembali ke aplikasi.
       if (uri.scheme == 'pocapp' && uri.host == 'payment') {
-        updateStatus('Pembayaran selesai, kembali ke aplikasi!');
+        updateStatus('Pembayaran selesai!');
+
+        // TUTUP OTOMATIS: Jika Custom Tab masih terbuka, tutup secara paksa.
+        // Ini mengatasi masalah "Zombie Tab" yang tertinggal setelah pembayaran.
+        if (await _browser.isOpened()) {
+          _addLog("[DeepLink] Closing Custom Tab...");
+          await _browser.close();
+        }
         
         // Mengirimkan event ke JavaScript di dalam WebView.
         webViewController
             ?.evaluateJavascript(
-              source: "javascript:window.dispatchEvent(new Event('paymentCompleted'));",
+              source: "window.dispatchEvent(new Event('paymentCompleted'));",
             )
             .catchError((e) {
           _addLog("[JS Error] $e");
@@ -227,7 +238,10 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     return NavigationActionPolicy.ALLOW;
   }
 
-  /// Membuka URL di Chrome Custom Tabs atau SFSafariViewController.
+  /// Membuka URL pembayaran secara cerdas.
+  /// 
+  /// 1. Mencoba membuka aplikasi native secara langsung (jika terinstal).
+  /// 2. Jika tidak ada aplikasi native, buka via Custom Tabs (Fallback).
   Future<void> _openInCustomTabs(String rawUrl) async {
     final cleanUrl = rawUrl.trim();
     final uri = Uri.tryParse(cleanUrl);
@@ -237,24 +251,40 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       return;
     }
 
-    _addLog("[Bridge] Triggering CustomTabs for: ${uri.host}");
+    _addLog("[Bridge] Processing URL: ${uri.host}");
+
     try {
-      // Membuka browser in-app dengan JavaScript aktif.
-      bool opened = await launchUrl(
+      // TAHAP 1: COBA BUKA APLIKASI NATIVE (App Links/Universal Links)
+      // Mode 'externalNonBrowserApplication' HANYA akan sukses jika ada aplikasi 
+      // yang bukan browser yang bisa menangani link ini.
+      // Ini membuat tombol Back akan kembali langsung ke aplikasi kita.
+      bool openedDirectly = await launchUrl(
         uri,
-        mode: LaunchMode.inAppBrowserView,
-        webViewConfiguration: const WebViewConfiguration(enableJavaScript: true),
+        mode: LaunchMode.externalNonBrowserApplication,
       );
 
-      // Fallback jika browser in-app gagal dibuka.
-      if (!opened) {
-        _addLog("[Bridge] Failed CustomTabs, trying External App...");
-        opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (openedDirectly) {
+        _addLog("[Bridge] Opened via Native App.");
+        return; // Berhasil, alur selesai.
       }
 
-      _addLog("[Bridge] Success: $opened");
+      // TAHAP 2: FALLBACK KE CUSTOM TABS
+      // Dijalankan jika user tidak punya aplikasi (misal tidak punya DANA).
+      _addLog("[Bridge] Native app not found. Opening Custom Tab...");
+      
+      await _browser.open(
+        url: WebUri.uri(uri),
+        settings: ChromeSafariBrowserSettings(
+          shareState: CustomTabsShareState.SHARE_STATE_OFF,
+          showTitle: true,
+          enableUrlBarHiding: true,
+          noHistory: false, // Memungkinkan navigasi di dalam browser
+        ),
+      );
     } catch (e) {
       _addLog("[Bridge Exception] $e");
+      // Upaya terakhir: Buka di browser eksternal apa pun
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
   }
 
@@ -263,7 +293,9 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     if (message != null && message.data != null) {
       final url = message.data.toString();
       _addLog("[Bridge] Received URL from Web: $url");
-      // Langsung buka di Custom Tabs untuk setiap pesan bridge yang valid.
+      // Hentikan loading di WebView utama untuk mencegah konflik navigasi
+      webViewController?.stopLoading();
+      // Langsung proses link secara cerdas
       _openInCustomTabs(url);
     }
   }

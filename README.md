@@ -37,11 +37,10 @@ If `APP_ENV` is not `dev` or `prod`, app will fallback to `dev`.
 - Use the switcher in app (`Use PROD`) to change between DEV and PROD.
 - `TARGET_URL` is still highest priority and will override switcher selection.
 
-## Config
+## Changelog & Improvements
 
-Edit [lib/config/custom_tabs_config.dart](lib/config/custom_tabs_config.dart):
-
-- `_devUrl`
-- `_prodUrl`
-- `APP_ENV` (`dev` or `prod`)
-- `TARGET_URL` (runtime override)
+### [24 April 2026] - Smart Payment Bridge & UX Fixes
+- **Improved Navigation Stack:** Added `LaunchMode.externalNonBrowserApplication` to prioritize opening native payment apps (DANA, ShopeePay, etc.) directly. This ensures the system "Back" button returns to the Flutter app instead of Chrome.
+- **Zombie Tab Prevention:** Integrated `ChromeSafariBrowser` (InAppWebView) to replace standard `url_launcher` for Custom Tabs. The app now forcibly closes the browser tab upon receiving the `paymentCompleted` deep link.
+- **Package Visibility Compliance:** Verified `<queries>` in `AndroidManifest.xml` to ensure compatibility with Android 11+ and Google Play Store policies.
+- **Dynamic Fallback:** Implementation automatically falls back to Custom Tabs if a native application is not installed on the device.

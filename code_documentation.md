@@ -29,27 +29,30 @@ Aplikasi menggunakan pendekatan "Walled Garden" untuk WebView Utama:
 
 ---
 
-## 4. Universal Payment Bridge (Custom Tabs)
+## 4. Universal Payment Bridge (Smart Navigation)
 
-Untuk mendukung provider pembayaran (DANA, ShopeePay, Finpay, dll) secara universal tanpa hardcode:
+Untuk mendukung provider pembayaran (DANA, ShopeePay, Finpay, dll) secara universal dengan UX yang mulus:
 
 1.  **Bridge Listener:** Flutter mendaftarkan listener JavaScript bernama `SapawargaChannel`.
-2.  **Web to Flutter:** Aplikasi Web memanggil `SapawargaChannel.postMessage(url)`.
-3.  **Action:** Flutter menangkap pesan tersebut di `handleWebMessage`.
-4.  **Custom Tabs:** URL tersebut langsung dibuka menggunakan **Chrome Custom Tabs** (Android) atau **SFSafariViewController** (iOS).
-5.  **Multi-Click Fix:** Controller memanggil `webViewController?.stopLoading()` sebelum memicu Custom Tabs untuk memastikan WebView tetap responsif jika link diklik berulang kali.
+2.  **Smart Routing (`_openInCustomTabs`):**
+    *   **Direct App Launch:** Aplikasi pertama-tama mencoba membuka URL menggunakan `LaunchMode.externalNonBrowserApplication`. Jika aplikasi (misal: DANA) terinstal, ia akan langsung dibuka. Hal ini memastikan tombol *Back* kembali langsung ke aplikasi kita.
+    *   **Custom Tabs Fallback:** Jika aplikasi tidak terinstal, sistem akan membuka **Chrome Custom Tabs** (Android) atau **SFSafariViewController** (iOS) menggunakan class `ChromeSafariBrowser`.
+3.  **Zombie Tab Prevention:** 
+    *   Ketika pembayaran selesai dan Deep Link `pocapp://payment/return` diterima, controller secara otomatis memanggil `_browser.close()`.
+    *   Hal ini memastikan tidak ada tab browser yang tertinggal (zombie) setelah user kembali ke aplikasi.
 
 ---
 
-## 5. Komunikasi Balik (Deep Linking)
+## 5. Komunikasi Balik (Deep Linking & Auto-Close)
 
 1.  **Deep Link Listener:** Flutter mendengarkan skema URL `pocapp://payment/return`.
-2.  **Callback:** Ketika provider pembayaran melakukan redirect kembali ke skema tersebut, Flutter menangkapnya di `_initDeepLinks`.
-3.  **Flutter to Web:** Flutter mengirimkan event JavaScript ke WebView:
+2.  **Cleanup & Callback:** 
+    *   Menutup instance `ChromeSafariBrowser` jika masih terbuka.
+    *   Mengirimkan event JavaScript ke WebView:
     ```javascript
     window.dispatchEvent(new Event('paymentCompleted'));
     ```
-4.  **Reaction:** Aplikasi Web menerima event tersebut dan dapat melakukan pengecekan status transaksi ke server.
+3.  **Reaction:** Aplikasi Web menerima event tersebut dan dapat melakukan pengecekan status transaksi ke server.
 
 ---
 
