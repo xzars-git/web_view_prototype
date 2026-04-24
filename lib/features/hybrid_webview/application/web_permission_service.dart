@@ -26,12 +26,9 @@ class GeolocationDecision {
 class WebPermissionService {
   Future<StartupPermissionOutcome> requestStartupPermissions() async {
     try {
-      final results = await Future.wait([
-        ph.Permission.camera.request(),
-        ph.Permission.locationWhenInUse.request(),
-      ]);
-      final cameraStatus = results[0];
-      final locationStatus = results[1];
+      // Minta izin secara sekuensial (satu per satu) agar dialog muncul berurutan
+      final locationStatus = await ph.Permission.locationWhenInUse.request();
+      final cameraStatus = await ph.Permission.camera.request();
 
       if (_isPermanentOrRestricted(cameraStatus) || _isPermanentOrRestricted(locationStatus)) {
         return StartupPermissionOutcome.permanentlyDenied;
@@ -49,72 +46,36 @@ class WebPermissionService {
     }
   }
 
+  Future<bool> isCameraGranted() async {
+    final status = await ph.Permission.camera.status;
+    return status.isGranted;
+  }
+
+  Future<bool> isLocationGranted() async {
+    final status = await ph.Permission.locationWhenInUse.status;
+    return status.isGranted;
+  }
+
   Future<WebPermissionDecision> handleWebPermissionRequest(PermissionRequest request) async {
-    var isGranted = true;
-    var hasPermanentDenial = false;
-
-    if (_requestNeedsCamera(request.resources)) {
-      final cameraStatus = await ph.Permission.camera.request();
-      isGranted = isGranted && _isGranted(cameraStatus);
-      hasPermanentDenial = hasPermanentDenial || _isPermanentOrRestricted(cameraStatus);
-    }
-
-    if (_requestNeedsMicrophone(request.resources)) {
-      final microphoneStatus = await ph.Permission.microphone.request();
-      isGranted = isGranted && _isGranted(microphoneStatus);
-      hasPermanentDenial = hasPermanentDenial || _isPermanentOrRestricted(microphoneStatus);
-    }
-
     return WebPermissionDecision(
-      granted: isGranted,
-      permanentlyDenied: hasPermanentDenial,
+      granted: true,
+      permanentlyDenied: false,
       response: PermissionResponse(
         resources: request.resources,
-        action: isGranted ? PermissionResponseAction.GRANT : PermissionResponseAction.DENY,
+        action: PermissionResponseAction.GRANT,
       ),
     );
   }
 
   Future<GeolocationDecision> handleGeolocationPrompt(String origin) async {
-    var isReady = await _isLocationReadyForWeb();
-
-    if (!isReady) {
-      final requestStatus = await ph.Permission.locationWhenInUse.request();
-      isReady = requestStatus.isGranted && await _isLocationReadyForWeb();
-    }
-
-    final serviceStatus = await ph.Permission.locationWhenInUse.serviceStatus;
-    final serviceEnabled = serviceStatus == ph.ServiceStatus.enabled;
-
     return GeolocationDecision(
-      locationServiceEnabled: serviceEnabled,
+      locationServiceEnabled: true,
       response: GeolocationPermissionShowPromptResponse(
         origin: origin,
-        allow: isReady,
+        allow: true,
         retain: true,
       ),
     );
-  }
-
-  Future<bool> _isLocationReadyForWeb() async {
-    final permission = await ph.Permission.locationWhenInUse.status;
-    if (!_isGranted(permission)) {
-      return false;
-    }
-
-    final serviceStatus = await ph.Permission.locationWhenInUse.serviceStatus;
-    return serviceStatus == ph.ServiceStatus.enabled;
-  }
-
-  bool _requestNeedsCamera(List<PermissionResourceType> resources) {
-    return resources.any((resource) {
-      final value = resource.toString().toLowerCase();
-      return value.contains('video') || value.contains('camera');
-    });
-  }
-
-  bool _requestNeedsMicrophone(List<PermissionResourceType> resources) {
-    return resources.any((resource) => resource.toString().toLowerCase().contains('audio'));
   }
 
   bool _isGranted(ph.PermissionStatus status) {

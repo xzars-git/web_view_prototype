@@ -21,14 +21,12 @@ class HybridWebViewPage extends StatefulWidget {
 
 class _HybridWebViewPageState extends State<HybridWebViewPage> {
   late final HybridWebViewController _controller;
+  bool _showDebug = true;
 
   @override
   void initState() {
     super.initState();
-    _controller = HybridWebViewController(
-      config: widget.config,
-      initialEnvironment: widget.initialEnvironment,
-    );
+    _controller = HybridWebViewController(config: widget.config);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _controller.requestStartupPermissions();
     });
@@ -44,6 +42,20 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     await ph.openAppSettings();
   }
 
+  Widget _buildPermissionChip(String label, bool granted) {
+    return Chip(
+      avatar: Icon(
+        granted ? Icons.check_circle : Icons.cancel,
+        color: granted ? Colors.green : Colors.red,
+        size: 14,
+      ),
+      label: Text(label, style: const TextStyle(fontSize: 10)),
+      backgroundColor: granted ? Colors.green.withOpacity(0.1) : Colors.red.withOpacity(0.1),
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<HybridWebViewState>(
@@ -51,54 +63,42 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
       builder: (context, state, _) {
         return Scaffold(
           appBar: AppBar(
-            title: const Text('Hybrid WebView + Custom Tabs'),
+            title: const Text('Hybrid WebView'),
             actions: [
+              IconButton(
+                onPressed: () => setState(() => _showDebug = !_showDebug),
+                icon: Icon(_showDebug ? Icons.bug_report : Icons.bug_report_outlined),
+                tooltip: 'Toggle Debug Tracker',
+              ),
               IconButton(
                 onPressed: _controller.reloadBasePage,
                 icon: const Icon(Icons.refresh),
-                tooltip: 'Reload halaman utama',
               ),
             ],
           ),
           body: Column(
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                child: Row(
                   children: [
-                    Text(state.status, style: Theme.of(context).textTheme.bodySmall),
-                    const SizedBox(height: 4),
-                    SwitchListTile.adaptive(
-                      contentPadding: EdgeInsets.zero,
-                      value: _controller.isProdSelected,
-                      onChanged: _controller.switchEnvironment,
-                      title: const Text('Use PROD'),
-                      subtitle: const Text('Off = DEV, On = PROD'),
+                    _buildPermissionChip('Cam', state.cameraGranted),
+                    const SizedBox(width: 4),
+                    _buildPermissionChip('Loc', state.locationGranted),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        state.status,
+                        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                    if (_controller.isPermanentlyDenied)
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: TextButton.icon(
-                          onPressed: _openAppSettings,
-                          icon: const Icon(Icons.settings),
-                          label: const Text('Buka Pengaturan Izin'),
-                        ),
-                      ),
-                    if (_controller.showRetryPermissionButton && !_controller.isPermanentlyDenied)
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: TextButton.icon(
-                          onPressed: _controller.requestStartupPermissions,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Minta Ulang Izin'),
-                        ),
-                      ),
                   ],
                 ),
               ),
               const Divider(height: 1),
               Expanded(
+                flex: 3,
                 child: _controller.isRequestingPermissions
                     ? const Center(child: CircularProgressIndicator())
                     : Stack(
@@ -115,6 +115,21 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                             ),
                             onWebViewCreated: (controller) {
                               _controller.webViewController = controller;
+                              
+                              // Dummy handler untuk inisialisasi bridge flutter_inappwebview
+                              controller.addJavaScriptHandler(
+                                handlerName: 'initBridge',
+                                callback: (args) => {},
+                              );
+
+                              controller.addWebMessageListener(
+                                WebMessageListener(
+                                  jsObjectName: "SapawargaChannel",
+                                  onPostMessage: (message, sourceOrigin, isMainFrame, replyProxy) {
+                                    _controller.handleWebMessage(message);
+                                  },
+                                ),
+                              );
                             },
                             shouldOverrideUrlLoading: (controller, navigationAction) async {
                               return _controller.handleNavigation(navigationAction);
@@ -137,6 +152,42 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                         ],
                       ),
               ),
+              if (_showDebug)
+                Container(
+                  height: 150,
+                  color: Colors.black.withOpacity(0.85),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        color: Colors.grey[800],
+                        child: const Row(
+                          children: [
+                            Icon(Icons.terminal, color: Colors.white, size: 14),
+                            SizedBox(width: 4),
+                            Text("DEBUG TRACKER", style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      ),
+                      Expanded(
+                        child: ListView.builder(
+                          padding: const EdgeInsets.all(4),
+                          itemCount: state.logs.length,
+                          itemBuilder: (context, index) {
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 2),
+                              child: Text(
+                                state.logs[index],
+                                style: const TextStyle(color: Colors.greenAccent, fontSize: 9, fontFamily: 'monospace'),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
             ],
           ),
         );

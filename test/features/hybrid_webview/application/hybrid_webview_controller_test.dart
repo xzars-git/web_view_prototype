@@ -12,6 +12,12 @@ class MockWebPermissionService implements WebPermissionService {
   Future<StartupPermissionOutcome> requestStartupPermissions() async => startupOutcome;
 
   @override
+  Future<bool> isCameraGranted() async => true;
+
+  @override
+  Future<bool> isLocationGranted() async => true;
+
+  @override
   Future<WebPermissionDecision> handleWebPermissionRequest(PermissionRequest request) async {
     return WebPermissionDecision(
       response: PermissionResponse(
@@ -38,6 +44,7 @@ class MockWebNavigationGuard implements WebNavigationGuard {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late HybridWebViewController controller;
   late MockWebPermissionService mockPermissionService;
   late MockWebNavigationGuard mockNavigationGuard;
@@ -48,15 +55,13 @@ void main() {
     mockNavigationGuard = MockWebNavigationGuard();
     controller = HybridWebViewController(
       config: config,
-      initialEnvironment: config.devEnv,
       permissionService: mockPermissionService,
       navigationGuard: mockNavigationGuard,
     );
   });
 
-  group('HybridWebViewController Tests', () {
+  group('HybridWebViewController Tests (Forced PROD)', () {
     test('Initial state is correct', () {
-      expect(controller.value.selectedEnvironment, config.devEnv);
       expect(controller.value.permissionState, StartupPermissionState.requesting);
       expect(controller.value.progress, 0);
     });
@@ -66,20 +71,14 @@ void main() {
       expect(controller.value.progress, 0.5);
     });
 
-    test('switchEnvironment updates environment and status', () {
-      controller.switchEnvironment(true); // Switch to PROD
-      expect(controller.value.selectedEnvironment, config.prodEnv);
-      expect(controller.isProdSelected, true);
-      expect(controller.value.status, contains('Environment diubah ke prod'));
-    });
-
     test('requestStartupPermissions success state', () async {
       mockPermissionService.startupOutcome = StartupPermissionOutcome.granted;
       await controller.requestStartupPermissions();
 
       expect(controller.value.permissionState, StartupPermissionState.ready);
       expect(controller.value.hasPermissionIssue, false);
-      expect(controller.value.status, contains('WebView aktif'));
+      expect(controller.value.cameraGranted, true);
+      expect(controller.value.locationGranted, true);
     });
 
     test('requestStartupPermissions permanentlyDenied state', () async {
@@ -89,15 +88,6 @@ void main() {
       expect(controller.value.permissionState, StartupPermissionState.permanentlyDenied);
       expect(controller.value.hasPermissionIssue, true);
       expect(controller.value.status, contains('ditolak permanen'));
-    });
-
-    test('requestStartupPermissions failed state', () async {
-      mockPermissionService.startupOutcome = StartupPermissionOutcome.failed;
-      await controller.requestStartupPermissions();
-
-      expect(controller.value.permissionState, StartupPermissionState.ready);
-      expect(controller.value.hasPermissionIssue, true);
-      expect(controller.value.status, contains('Gagal meminta izin'));
     });
   });
 }

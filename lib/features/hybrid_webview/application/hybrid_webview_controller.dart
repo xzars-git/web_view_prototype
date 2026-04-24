@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -13,14 +15,18 @@ class HybridWebViewState {
   final double progress;
   final StartupPermissionState permissionState;
   final bool hasPermissionIssue;
-  final String selectedEnvironment;
+  final bool cameraGranted;
+  final bool locationGranted;
+  final List<String> logs; // Untuk Debug Tracker
 
   const HybridWebViewState({
     required this.status,
     required this.progress,
     required this.permissionState,
     required this.hasPermissionIssue,
-    required this.selectedEnvironment,
+    this.cameraGranted = false,
+    this.locationGranted = false,
+    this.logs = const [],
   });
 
   HybridWebViewState copyWith({
@@ -28,14 +34,18 @@ class HybridWebViewState {
     double? progress,
     StartupPermissionState? permissionState,
     bool? hasPermissionIssue,
-    String? selectedEnvironment,
+    bool? cameraGranted,
+    bool? locationGranted,
+    List<String>? logs,
   }) {
     return HybridWebViewState(
       status: status ?? this.status,
       progress: progress ?? this.progress,
       permissionState: permissionState ?? this.permissionState,
       hasPermissionIssue: hasPermissionIssue ?? this.hasPermissionIssue,
-      selectedEnvironment: selectedEnvironment ?? this.selectedEnvironment,
+      cameraGranted: cameraGranted ?? this.cameraGranted,
+      locationGranted: locationGranted ?? this.locationGranted,
+      logs: logs ?? this.logs,
     );
   }
 }
@@ -43,33 +53,61 @@ class HybridWebViewState {
 class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   HybridWebViewController({
     required AppConfig config,
-    required String initialEnvironment,
     WebPermissionService? permissionService,
     WebNavigationGuard? navigationGuard,
   })  : _config = config,
         _permissionService = permissionService ?? WebPermissionService(),
         _navigationGuard = navigationGuard ?? WebNavigationGuard(config: config),
-        super(HybridWebViewState(
-          status: 'Meminta izin camera dan location...',
+        super(const HybridWebViewState(
+          status: 'Menyiapkan aplikasi...',
           progress: 0,
           permissionState: StartupPermissionState.requesting,
           hasPermissionIssue: false,
-          selectedEnvironment: config.normalizeEnvironment(initialEnvironment),
-        ));
+          logs: ['[System] App Initialized'],
+        )) {
+    _initDeepLinks();
+  }
 
   final AppConfig _config;
   final WebPermissionService _permissionService;
   final WebNavigationGuard _navigationGuard;
   InAppWebViewController? webViewController;
 
-  String get effectiveWebViewUrl {
-    if (_config.isTargetUrlOverridden) {
-      return _config.targetUrl;
-    }
-    return _config.urlForEnvironment(value.selectedEnvironment);
+  late AppLinks _appLinks;
+  StreamSubscription<Uri>? _linkSubscription;
+
+  void _addLog(String message) {
+    final now = DateTime.now();
+    final time = "${now.hour}:${now.minute}:${now.second}";
+    value = value.copyWith(logs: ["[$time] $message", ...value.logs.take(49)]);
+    debugPrint("DEBUG_LOG: $message");
   }
 
-  bool get isProdSelected => value.selectedEnvironment == _config.prodEnv;
+  void _initDeepLinks() {
+    _appLinks = AppLinks();
+    _linkSubscription = _appLinks.uriLinkStream.listen((uri) {
+      _addLog("[DeepLink] Received: $uri");
+      if (uri.scheme == 'pocapp' && uri.host == 'payment') {
+        updateStatus('Pembayaran selesai, kembali ke aplikasi!');
+        webViewController
+            ?.evaluateJavascript(
+              source: "javascript:window.dispatchEvent(new Event('paymentCompleted'));",
+            )
+            .catchError((e) {
+          _addLog("[JS Error] $e");
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _linkSubscription?.cancel();
+    super.dispose();
+  }
+
+  String get effectiveWebViewUrl => _config.targetUrl;
+
   bool get isRequestingPermissions => value.permissionState == StartupPermissionState.requesting;
   bool get isPermanentlyDenied => value.permissionState == StartupPermissionState.permanentlyDenied;
   bool get showRetryPermissionButton =>
@@ -81,41 +119,30 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   void updateStatus(String status) {
     value = value.copyWith(status: status);
+    _addLog("[Status] $status");
   }
 
   Future<void> requestStartupPermissions() async {
-    value = value.copyWith(
-      permissionState: StartupPermissionState.requesting,
-      status: 'Meminta izin camera dan location...',
-      hasPermissionIssue: false,
-    );
+    await Future.delayed(const Duration(milliseconds: 500));
+    updateStatus('Meminta izin kamera dan lokasi...');
 
     try {
       final outcome = await _permissionService.requestStartupPermissions();
+      final cam = await _permissionService.isCameraGranted();
+      final loc = await _permissionService.isLocationGranted();
+      
+      value = value.copyWith(
+        cameraGranted: cam,
+        locationGranted: loc,
+      );
+
+      _addLog("[Perms] Cam: $cam, Loc: $loc, Outcome: $outcome");
 
       if (outcome == StartupPermissionOutcome.permanentlyDenied) {
         value = value.copyWith(
           permissionState: StartupPermissionState.permanentlyDenied,
           hasPermissionIssue: true,
-          status: 'Izin camera/location ditolak permanen. Aktifkan dari pengaturan perangkat.',
-        );
-        return;
-      }
-
-      if (outcome == StartupPermissionOutcome.denied) {
-        value = value.copyWith(
-          permissionState: StartupPermissionState.ready,
-          hasPermissionIssue: true,
-          status: 'Izin camera/location ditolak. Beberapa fitur web mungkin tidak berjalan.',
-        );
-        return;
-      }
-
-      if (outcome == StartupPermissionOutcome.failed) {
-        value = value.copyWith(
-          permissionState: StartupPermissionState.ready,
-          hasPermissionIssue: true,
-          status: 'Gagal meminta izin camera/location dari perangkat.',
+          status: 'Izin ditolak permanen.',
         );
         return;
       }
@@ -123,71 +150,27 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       value = value.copyWith(
         permissionState: StartupPermissionState.ready,
         hasPermissionIssue: false,
-        status: 'WebView aktif. Halaman payment akan dibuka di Custom Tabs.',
+        status: 'Aplikasi siap.',
       );
     } catch (e) {
-      value = value.copyWith(
-        permissionState: StartupPermissionState.ready,
-        hasPermissionIssue: true,
-        status: 'Gagal meminta izin camera/location dari perangkat.',
-      );
+      _addLog("[Error] Permission Request: $e");
     }
   }
 
   Future<PermissionResponse> handleWebPermissionRequest(PermissionRequest request) async {
-    try {
-      final decision = await _permissionService.handleWebPermissionRequest(request);
-      if (!decision.granted) {
-        value = value.copyWith(hasPermissionIssue: true);
-        if (decision.permanentlyDenied) {
-          value = value.copyWith(permissionState: StartupPermissionState.permanentlyDenied);
-        }
-        updateStatus('Izin camera/microphone untuk web ditolak. Fitur media mungkin tidak berjalan.');
-      }
-      return decision.response;
-    } catch (e) {
-      return PermissionResponse(
-        resources: request.resources,
-        action: PermissionResponseAction.DENY,
-      );
-    }
+    _addLog("[WebPerm] Requesting: ${request.resources}");
+    return _permissionService.handleWebPermissionRequest(request).then((d) => d.response);
   }
 
   Future<GeolocationPermissionShowPromptResponse> handleGeolocationPrompt(String origin) async {
-    try {
-      final decision = await _permissionService.handleGeolocationPrompt(origin);
-      if (!decision.response.allow) {
-        value = value.copyWith(hasPermissionIssue: true);
-        if (!decision.locationServiceEnabled) {
-          updateStatus('Layanan lokasi perangkat mati. Aktifkan GPS untuk fitur lokasi di web.');
-        } else {
-          updateStatus('Izin camera/location ditolak. Beberapa fitur web mungkin tidak berjalan.');
-        }
-      }
-      return decision.response;
-    } catch (e) {
-      return GeolocationPermissionShowPromptResponse(
-        origin: origin,
-        allow: false,
-        retain: false,
-      );
-    }
+    _addLog("[Geo] Requesting for: $origin");
+    return _permissionService.handleGeolocationPrompt(origin).then((d) => d.response);
   }
 
   Future<void> reloadBasePage() async {
-    if (webViewController == null) {
-      updateStatus('WebView belum siap. Memuat ulang dibatalkan.');
-      return;
-    }
-
-    final uri = Uri.tryParse(effectiveWebViewUrl);
-    if (uri == null) {
-      updateStatus('URL tidak valid: $effectiveWebViewUrl');
-      return;
-    }
-
-    await webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri.uri(uri)));
-    updateStatus('Memuat ulang halaman utama di WebView.');
+    if (webViewController == null) return;
+    _addLog("[Reload] Loading base URL");
+    await webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri.uri(Uri.parse(effectiveWebViewUrl))));
   }
 
   Future<NavigationActionPolicy> handleNavigation(NavigationAction navigationAction) async {
@@ -195,13 +178,17 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     final rawUrl = uri?.toString() ?? '';
     final handling = _navigationGuard.evaluate(rawUrl);
 
+    _addLog("[Nav] ${handling.name.toUpperCase()} -> $rawUrl");
+
     if (handling == NavigationHandling.openInCustomTabs) {
-      await _openInCustomTabs(rawUrl);
+      _addLog("[Nav] Intercepting for CustomTabs...");
+      // Hentikan loading secara eksplisit agar WebView tidak "nyangkut"
+      webViewController?.stopLoading();
+      unawaited(_openInCustomTabs(rawUrl));
       return NavigationActionPolicy.CANCEL;
     }
 
     if (handling == NavigationHandling.block) {
-      updateStatus('Navigasi diblokir karena URL tidak ada di allowlist.');
       return NavigationActionPolicy.CANCEL;
     }
 
@@ -209,48 +196,38 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   }
 
   Future<void> _openInCustomTabs(String rawUrl) async {
-    final uri = Uri.tryParse(rawUrl);
-    if (uri == null) {
-      updateStatus('URL payment tidak valid.');
+    final cleanUrl = rawUrl.trim();
+    final uri = Uri.tryParse(cleanUrl);
+    
+    if (uri == null || !uri.hasAbsolutePath) {
+      _addLog("[Error] Malformed URL: $cleanUrl");
       return;
     }
 
-    bool opened = false;
+    _addLog("[CustomTabs] Launching: ${uri.host}");
     try {
-      opened = await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
-    } catch (e) {
-      opened = false;
-    }
+      bool opened = await launchUrl(
+        uri,
+        mode: LaunchMode.inAppBrowserView,
+        webViewConfiguration: const WebViewConfiguration(enableJavaScript: true),
+      );
 
-    if (!opened) {
-      try {
+      if (!opened) {
+        _addLog("[CustomTabs] Failed, trying External App...");
         opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      } catch (e) {
-        opened = false;
       }
-    }
 
-    updateStatus(opened
-        ? 'Halaman payment dibuka di Custom Tabs. Tutup tab untuk kembali ke WebView.'
-        : 'Gagal membuka halaman payment di Custom Tabs.');
+      _addLog("[CustomTabs] Success: $opened");
+    } catch (e) {
+      _addLog("[CustomTabs Exception] $e");
+    }
   }
 
-  void switchEnvironment(bool useProd) {
-    final nextEnvironment = useProd ? _config.prodEnv : _config.devEnv;
-    value = value.copyWith(selectedEnvironment: nextEnvironment);
-
-    if (webViewController == null) {
-      updateStatus(
-        'Environment diubah ke ${value.selectedEnvironment}. WebView akan memuat URL ini saat siap.',
-      );
-      return;
+  void handleWebMessage(WebMessage? message) {
+    if (message != null && message.data != null) {
+      final url = message.data.toString();
+      _addLog("[WebMessage] Data: $url");
+      _openInCustomTabs(url);
     }
-
-    updateStatus(
-      _config.isTargetUrlOverridden
-          ? 'TARGET_URL override aktif, switcher tidak mengubah URL target.'
-          : 'Environment diubah ke ${value.selectedEnvironment}. Memuat ulang WebView...',
-    );
-    reloadBasePage();
   }
 }
