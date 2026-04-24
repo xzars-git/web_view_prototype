@@ -8,15 +8,30 @@ import '../../../config/app_config.dart';
 import '../domain/web_navigation_guard.dart';
 import 'web_permission_service.dart';
 
+/// Status siklus hidup perizinan aplikasi saat startup.
 enum StartupPermissionState { requesting, ready, permanentlyDenied }
 
+/// Representasi state untuk fitur Hybrid WebView.
 class HybridWebViewState {
+  /// Pesan status operasional aplikasi.
   final String status;
+  
+  /// Progress pemuatan WebView (0.0 ke 1.0).
   final double progress;
+  
+  /// Tahap perizinan sistem saat ini.
   final StartupPermissionState permissionState;
+  
+  /// Flag jika terdeteksi isu perizinan (misal ditolak).
   final bool hasPermissionIssue;
+  
+  /// Status izin kamera sistem.
   final bool cameraGranted;
+  
+  /// Status izin lokasi sistem.
   final bool locationGranted;
+  
+  /// Daftar riwayat log untuk Debug Tracker.
   final List<String> logs;
 
   const HybridWebViewState({
@@ -29,6 +44,7 @@ class HybridWebViewState {
     this.logs = const [],
   });
 
+  /// Helper untuk membuat copy dari state dengan perubahan beberapa field.
   HybridWebViewState copyWith({
     String? status,
     double? progress,
@@ -50,6 +66,9 @@ class HybridWebViewState {
   }
 }
 
+/// Controller utama yang mengelola logika bisnis dan state untuk Hybrid WebView.
+/// 
+/// Menggunakan [ValueNotifier] agar UI dapat merespon perubahan state secara reaktif.
 class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   HybridWebViewController({
     required AppConfig config,
@@ -71,24 +90,33 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   final AppConfig _config;
   final WebPermissionService _permissionService;
   final WebNavigationGuard _navigationGuard;
+  
+  /// Referensi ke InAppWebViewController untuk manipulasi WebView secara langsung.
   InAppWebViewController? webViewController;
 
   late AppLinks _appLinks;
   StreamSubscription<Uri>? _linkSubscription;
 
+  /// Mencatat pesan ke dalam riwayat log Debug Tracker.
   void _addLog(String message) {
+    if (kReleaseMode) return;
     final now = DateTime.now();
-    final time = "${now.hour}:${now.minute}:${now.second}";
+    final time = "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
     value = value.copyWith(logs: ["[$time] $message", ...value.logs.take(49)]);
     debugPrint("DEBUG_LOG: $message");
   }
 
+  /// Menginisialisasi pendengar Deep Link (pocapp://).
   void _initDeepLinks() {
     _appLinks = AppLinks();
     _linkSubscription = _appLinks.uriLinkStream.listen((uri) {
       _addLog("[DeepLink] Received: $uri");
+      
+      // Menangani callback pembayaran kembali ke aplikasi.
       if (uri.scheme == 'pocapp' && uri.host == 'payment') {
         updateStatus('Pembayaran selesai, kembali ke aplikasi!');
+        
+        // Mengirimkan event ke JavaScript di dalam WebView.
         webViewController
             ?.evaluateJavascript(
               source: "javascript:window.dispatchEvent(new Event('paymentCompleted'));",
@@ -106,6 +134,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     super.dispose();
   }
 
+  /// URL utama yang harus dimuat oleh WebView.
   String get effectiveWebViewUrl => _config.targetUrl;
 
   bool get isRequestingPermissions => value.permissionState == StartupPermissionState.requesting;
@@ -113,16 +142,20 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   bool get showRetryPermissionButton =>
       value.permissionState == StartupPermissionState.ready && value.hasPermissionIssue;
 
+  /// Memperbarui progres pemuatan halaman.
   void updateProgress(double progress) {
     value = value.copyWith(progress: progress);
   }
 
+  /// Memperbarui pesan status dan mencatatnya ke log.
   void updateStatus(String status) {
     value = value.copyWith(status: status);
     _addLog("[Status] $status");
   }
 
+  /// Meminta izin sistem (Lokasi & Kamera) secara sekuensial.
   Future<void> requestStartupPermissions() async {
+    // Delay singkat untuk stabilitas inisialisasi UI.
     await Future.delayed(const Duration(milliseconds: 500));
     updateStatus('Meminta izin kamera dan lokasi...');
 
@@ -142,14 +175,14 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
         value = value.copyWith(
           permissionState: StartupPermissionState.permanentlyDenied,
           hasPermissionIssue: true,
-          status: 'Izin ditolak permanen.',
+          status: 'Izin ditolak permanen. Aktifkan dari pengaturan perangkat.',
         );
         return;
       }
 
       value = value.copyWith(
         permissionState: StartupPermissionState.ready,
-        hasPermissionIssue: false,
+        hasPermissionIssue: outcome != StartupPermissionOutcome.granted,
         status: 'Aplikasi siap.',
       );
     } catch (e) {
@@ -157,22 +190,28 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     }
   }
 
+  /// Menangani permintaan izin dari dalam WebView (Android).
   Future<PermissionResponse> handleWebPermissionRequest(PermissionRequest request) async {
     _addLog("[WebPerm] Requesting: ${request.resources}");
+    // Mengembalikan status GRANT karena izin sistem sudah divalidasi di startup.
     return _permissionService.handleWebPermissionRequest(request).then((d) => d.response);
   }
 
+  /// Menangani permintaan izin geolokasi dari dalam WebView.
   Future<GeolocationPermissionShowPromptResponse> handleGeolocationPrompt(String origin) async {
     _addLog("[Geo] Requesting for: $origin");
+    // Mengembalikan status ALLOW karena izin sistem sudah divalidasi di startup.
     return _permissionService.handleGeolocationPrompt(origin).then((d) => d.response);
   }
 
+  /// Memuat ulang halaman utama aplikasi.
   Future<void> reloadBasePage() async {
     if (webViewController == null) return;
     _addLog("[Reload] Loading base URL");
     await webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri.uri(Uri.parse(effectiveWebViewUrl))));
   }
 
+  /// Mengevaluasi setiap navigasi URL yang terjadi di WebView.
   Future<NavigationActionPolicy> handleNavigation(NavigationAction navigationAction) async {
     final uri = navigationAction.request.url;
     final rawUrl = uri?.toString() ?? '';
@@ -181,8 +220,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     _addLog("[Nav] ${handling.name.toUpperCase()} -> $rawUrl");
 
     if (handling == NavigationHandling.block) {
-      // Jika navigasi diblokir (bukan host aplikasi),
-      // kita asumsi sisi Web lupa kirim via Bridge, tapi kita blokir demi keamanan.
       _addLog("[Guard] Blocked navigation to external host: $rawUrl");
       return NavigationActionPolicy.CANCEL;
     }
@@ -190,6 +227,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     return NavigationActionPolicy.ALLOW;
   }
 
+  /// Membuka URL di Chrome Custom Tabs atau SFSafariViewController.
   Future<void> _openInCustomTabs(String rawUrl) async {
     final cleanUrl = rawUrl.trim();
     final uri = Uri.tryParse(cleanUrl);
@@ -201,27 +239,31 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
     _addLog("[Bridge] Triggering CustomTabs for: ${uri.host}");
     try {
+      // Membuka browser in-app dengan JavaScript aktif.
       bool opened = await launchUrl(
         uri,
         mode: LaunchMode.inAppBrowserView,
         webViewConfiguration: const WebViewConfiguration(enableJavaScript: true),
       );
 
+      // Fallback jika browser in-app gagal dibuka.
       if (!opened) {
         _addLog("[Bridge] Failed CustomTabs, trying External App...");
         opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
       }
 
-      _addLog("[Bridge] Result: $opened");
+      _addLog("[Bridge] Success: $opened");
     } catch (e) {
       _addLog("[Bridge Exception] $e");
     }
   }
 
+  /// Handler untuk pesan yang diterima dari JavaScript via 'SapawargaChannel'.
   void handleWebMessage(WebMessage? message) {
     if (message != null && message.data != null) {
       final url = message.data.toString();
       _addLog("[Bridge] Received URL from Web: $url");
+      // Langsung buka di Custom Tabs untuk setiap pesan bridge yang valid.
       _openInCustomTabs(url);
     }
   }
