@@ -245,8 +245,9 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   /// Membuka URL pembayaran secara cerdas.
   /// 
-  /// 1. Mencoba membuka aplikasi native secara langsung (jika terinstal).
-  /// 2. Jika tidak ada aplikasi native, buka via Custom Tabs (Fallback).
+  /// 1. Jika skema bukan HTTP/HTTPS (seperti dana://), buka aplikasi luar secara langsung.
+  /// 2. Jika HTTP/HTTPS (seperti link Finpay/Shopee), gunakan Custom Tabs.
+  ///    Custom Tabs menjaga konteks navigasi agar tidak lari ke Google Chrome standalone.
   Future<void> _openInCustomTabs(String rawUrl) async {
     final cleanUrl = rawUrl.trim();
     final uri = Uri.tryParse(cleanUrl);
@@ -259,23 +260,18 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     _addLog("[Bridge] Processing URL: ${uri.host}");
 
     try {
-      // TAHAP 1: COBA BUKA APLIKASI NATIVE (App Links/Universal Links)
-      // Mode 'externalNonBrowserApplication' HANYA akan sukses jika ada aplikasi 
-      // yang bukan browser yang bisa menangani link ini.
-      // Ini membuat tombol Back akan kembali langsung ke aplikasi kita.
-      bool openedDirectly = await launchUrl(
-        uri,
-        mode: LaunchMode.externalNonBrowserApplication,
-      );
-
-      if (openedDirectly) {
-        _addLog("[Bridge] Opened via Native App.");
-        return; // Berhasil, alur selesai.
+      // JIKA BUKAN HTTP/HTTPS (Contoh: dana://, whatsapp://)
+      if (!uri.scheme.startsWith('http')) {
+        _addLog("[Bridge] Direct Scheme detected. Launching External...");
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+        return;
       }
 
-      // TAHAP 2: FALLBACK KE CUSTOM TABS
-      // Dijalankan jika user tidak punya aplikasi (misal tidak punya DANA).
-      _addLog("[Bridge] Native app not found. Opening Custom Tab...");
+      // JIKA HTTP/HTTPS (Link Pembayaran)
+      // Kita gunakan ChromeSafariBrowser agar navigasi tetap dalam satu 'task' aplikasi.
+      // Jika kita gunakan 'externalNonBrowserApplication' pada link HTTPS, 
+      // OS akan memutus konteks dan seringkali lari ke Google Chrome standalone.
+      _addLog("[Bridge] Opening via Custom Tab to maintain context...");
       
       await _browser.open(
         url: WebUri.uri(uri),
@@ -283,7 +279,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
           shareState: CustomTabsShareState.SHARE_STATE_OFF,
           showTitle: true,
           enableUrlBarHiding: true,
-          noHistory: false, // Memungkinkan navigasi di dalam browser
+          noHistory: false,
         ),
       );
     } catch (e) {
