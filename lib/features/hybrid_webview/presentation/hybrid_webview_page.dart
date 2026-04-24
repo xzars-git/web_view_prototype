@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
@@ -105,13 +106,23 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                           // Widget WebView Inti.
                           InAppWebView(
                             initialUrlRequest: URLRequest(url: WebUri(_controller.effectiveWebViewUrl)),
+                            initialUserScripts: UnmodifiableListView<UserScript>([
+                              _controller.bridgeUserScript,
+                            ]),
                             initialSettings: InAppWebViewSettings(
                               javaScriptEnabled: true,
                               useShouldOverrideUrlLoading: true,
                               geolocationEnabled: true,
                               databaseEnabled: true,
                               domStorageEnabled: true,
+                              mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
                               mediaPlaybackRequiresUserGesture: false,
+                              // Optimalisasi untuk rendering halaman berat (Kartu Kredit/VA)
+                              useWideViewPort: true,
+                              loadWithOverviewMode: true,
+                              supportZoom: true,
+                              builtInZoomControls: true,
+                              displayZoomControls: false,
                             ),
                             onWebViewCreated: (controller) {
                               _controller.webViewController = controller;

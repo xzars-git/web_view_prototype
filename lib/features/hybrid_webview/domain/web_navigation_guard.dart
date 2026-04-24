@@ -25,11 +25,32 @@ class WebNavigationGuard {
       return NavigationHandling.allowWebView;
     }
 
-    // Memeriksa apakah URL termasuk dalam host aplikasi yang diizinkan.
-    if (!_config.isWebViewNavigationAllowed(rawUrl)) {
-      return NavigationHandling.block;
+    final uri = Uri.tryParse(rawUrl);
+    if (uri == null) return NavigationHandling.block;
+
+    // 1. IZINKAN jika host masuk dalam Whitelist resmi aplikasi.
+    if (_config.isWebViewNavigationAllowed(rawUrl)) {
+      return NavigationHandling.allowWebView;
     }
 
-    return NavigationHandling.allowWebView;
+    // 2. TOLERANSI PEMBAYARAN: Izinkan jika URL mengandung pola umum sistem pembayaran.
+    // Ini penting untuk Kartu Kredit karena sering ada redirect ke bank (3D Secure).
+    final paymentKeywords = [
+      'finpay', 
+      '3dsecure', 
+      'verifypass', 
+      'callback', 
+      'api.bni', 
+      'mandiri.co.id',
+      'klikbca'
+    ];
+    
+    final lowerUrl = rawUrl.toLowerCase();
+    if (paymentKeywords.any((keyword) => lowerUrl.contains(keyword))) {
+       return NavigationHandling.allowWebView;
+    }
+
+    // 3. BLOKIR jika tidak memenuhi kriteria di atas.
+    return NavigationHandling.block;
   }
 }

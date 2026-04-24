@@ -37,7 +37,7 @@ class DefaultAppConfig implements AppConfig {
   // URL dasar produksi, disuntikkan via PROD_BASE_URL.
   static const String _prodBaseUrl = String.fromEnvironment(
     'PROD_BASE_URL',
-    defaultValue: 'https://sambarav2.vercel.app/beranda',
+    defaultValue: 'https://test-sambara-7u6p5fv7n-xzars-projects.vercel.app/beranda',
   );
 
   // Token data sensitif, disuntikkan via TARGET_DATA_TOKEN.
@@ -51,7 +51,7 @@ class DefaultAppConfig implements AppConfig {
   /// Disuntikkan via WEBVIEW_ALLOWED_HOSTS (comma separated).
   static const String _allowedHostsEnv = String.fromEnvironment(
     'WEBVIEW_ALLOWED_HOSTS',
-    defaultValue: '10.44.121.12,sambarav2.vercel.app',
+    defaultValue: '10.44.121.12,sambarav2.vercel.app,live.finpay.id,test-sambara-7u6p5fv7n-xzars-projects.vercel.app',
   );
 
   List<String> get _webViewAllowedHosts =>
