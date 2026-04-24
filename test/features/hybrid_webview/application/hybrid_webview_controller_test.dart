@@ -5,6 +5,7 @@ import 'package:web_view_prototype/features/hybrid_webview/application/hybrid_we
 import 'package:web_view_prototype/features/hybrid_webview/application/web_permission_service.dart';
 import 'package:web_view_prototype/features/hybrid_webview/domain/web_navigation_guard.dart';
 
+/// Mock Service untuk mensimulasikan interaksi perizinan native tanpa membutuhkan perangkat fisik.
 class MockWebPermissionService implements WebPermissionService {
   StartupPermissionOutcome startupOutcome = StartupPermissionOutcome.granted;
 
@@ -38,13 +39,17 @@ class MockWebPermissionService implements WebPermissionService {
   }
 }
 
+/// Mock Guard untuk mensimulasikan aturan navigasi dalam unit test.
 class MockWebNavigationGuard implements WebNavigationGuard {
   @override
   NavigationHandling evaluate(String url) => NavigationHandling.allowWebView;
 }
 
+/// Unit test untuk memverifikasi logika orkestrasi di HybridWebViewController.
 void main() {
+  // Inisialisasi binding Flutter yang diperlukan oleh InAppWebView dalam test.
   TestWidgetsFlutterBinding.ensureInitialized();
+  
   late HybridWebViewController controller;
   late MockWebPermissionService mockPermissionService;
   late MockWebNavigationGuard mockNavigationGuard;
@@ -62,16 +67,19 @@ void main() {
 
   group('HybridWebViewController Tests (Forced PROD)', () {
     test('Initial state is correct', () {
+      // Memastikan state awal sesuai dengan ekspektasi sebelum aksi dilakukan.
       expect(controller.value.permissionState, StartupPermissionState.requesting);
       expect(controller.value.progress, 0);
     });
 
     test('updateProgress updates state correctly', () {
+      // Memastikan progres bar WebView di UI terupdate melalui state.
       controller.updateProgress(0.5);
       expect(controller.value.progress, 0.5);
     });
 
     test('requestStartupPermissions success state', () async {
+      // Mensimulasikan keberhasilan pemberian izin sistem.
       mockPermissionService.startupOutcome = StartupPermissionOutcome.granted;
       await controller.requestStartupPermissions();
 
@@ -82,6 +90,7 @@ void main() {
     });
 
     test('requestStartupPermissions permanentlyDenied state', () async {
+      // Mensimulasikan kondisi di mana user menolak izin secara permanen.
       mockPermissionService.startupOutcome = StartupPermissionOutcome.permanentlyDenied;
       await controller.requestStartupPermissions();
 

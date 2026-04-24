@@ -1,7 +1,14 @@
 import 'package:flutter/material.dart';
 
+/// Komponen UI ringkas untuk menampilkan status izin hardware.
+/// 
+/// Memberikan indikasi visual (Warna Hijau/Merah) apakah akses ke
+/// kamera atau lokasi saat ini diizinkan oleh sistem operasi.
 class PermissionChip extends StatelessWidget {
+  /// Nama izin (misal: 'Cam', 'Loc').
   final String label;
+  
+  /// Status izin saat ini.
   final bool granted;
 
   const PermissionChip({

@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 
+/// Widget overlay untuk menampilkan log sistem secara real-time.
+/// 
+/// Digunakan oleh developer untuk memantau navigasi URL, status perizinan,
+/// dan pesan dari bridge JavaScript tanpa harus terhubung ke kabel USB debug.
 class DebugTrackerOverlay extends StatelessWidget {
+  /// Daftar pesan log yang akan ditampilkan (diurutkan dari yang terbaru).
   final List<String> logs;
 
   const DebugTrackerOverlay({
@@ -16,6 +21,7 @@ class DebugTrackerOverlay extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Header panel debug.
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
             color: Colors.grey[800],
@@ -34,6 +40,7 @@ class DebugTrackerOverlay extends StatelessWidget {
               ],
             ),
           ),
+          // Daftar log scrollable.
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.all(4),
