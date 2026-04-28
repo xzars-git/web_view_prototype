@@ -1,26 +1,27 @@
 import '../../../config/app_config.dart';
 
 /// Jenis penanganan untuk navigasi URL di WebView.
-enum NavigationHandling { 
+enum NavigationHandling {
   /// Mengizinkan pemuatan di dalam WebView utama.
-  allowWebView, 
-  
+  allowWebView,
+
   /// Memblokir pemuatan URL (untuk host eksternal yang tidak dikenal).
-  block 
+  block,
 }
 
 /// Domain Logic untuk keamanan navigasi WebView.
-/// 
-/// Class ini murni berisi aturan bisnis untuk mengevaluasi apakah sebuah URL
-/// aman atau berbahaya bagi aplikasi.
+///
+/// Evaluasi URL berdasarkan:
+/// 1. Whitelist domain resmi (dari AppConfig)
+/// 2. Payment tolerance keywords (untuk 3D Secure bank redirects)
+/// 3. Block semuanya yang tidak memenuhi kriteria di atas
 class WebNavigationGuard {
   final AppConfig _config;
 
   const WebNavigationGuard({required AppConfig config}) : _config = config;
 
-  /// Mengevaluasi URL dan menentukan tindakan yang harus diambil.
+  /// Mengevaluasi URL untuk navigasi yang aman.
   NavigationHandling evaluate(String rawUrl) {
-    // Mengizinkan URL kosong (biasanya terjadi saat inisialisasi).
     if (rawUrl.isEmpty) {
       return NavigationHandling.allowWebView;
     }
@@ -28,29 +29,31 @@ class WebNavigationGuard {
     final uri = Uri.tryParse(rawUrl);
     if (uri == null) return NavigationHandling.block;
 
-    // 1. IZINKAN jika host masuk dalam Whitelist resmi aplikasi.
+    // 1. WHITELIST: Izinkan jika domain ada di allow list
     if (_config.isWebViewNavigationAllowed(rawUrl)) {
+      print("DEBUG_GUARD: ✅ URL passed whitelist check");
       return NavigationHandling.allowWebView;
     }
 
-    // 2. TOLERANSI PEMBAYARAN: Izinkan jika URL mengandung pola umum sistem pembayaran.
-    // Ini penting untuk Kartu Kredit karena sering ada redirect ke bank (3D Secure).
+    // 2. PAYMENT TOLERANCE: Izinkan payment gateway & 3D Secure redirects
     final paymentKeywords = [
-      'finpay', 
-      '3dsecure', 
-      'verifypass', 
-      'callback', 
-      'api.bni', 
+      'finpay',
+      '3dsecure',
+      'verifypass',
+      'callback',
+      'api.bni',
       'mandiri.co.id',
-      'klikbca'
+      'klikbca',
     ];
-    
+
     final lowerUrl = rawUrl.toLowerCase();
     if (paymentKeywords.any((keyword) => lowerUrl.contains(keyword))) {
-       return NavigationHandling.allowWebView;
+      print("DEBUG_GUARD: ✅ URL passed payment tolerance check");
+      return NavigationHandling.allowWebView;
     }
 
-    // 3. BLOKIR jika tidak memenuhi kriteria di atas.
+    // 3. BLOCK: Semua URL lain yang tidak masuk kategori di atas
+    print("DEBUG_GUARD: 🛑 URL BLOCKED - not in whitelist or payment keywords");
     return NavigationHandling.block;
   }
 }
