@@ -1,72 +1,88 @@
-# Dokumentasi Teknis Alur Aplikasi: Web View Prototype
+# Dokumentasi Teknis - Web View Prototype (Hybrid)
 
-## 1. Pendahuluan
-
-Aplikasi ini dirancang sebagai jembatan antara aplikasi berbasis web dan fitur native perangkat seluler. Fokus utamanya adalah **keamanan navigasi**, **manajemen perizinan**, dan **komunikasi bridge universal**.
+Proyek ini adalah prototipe aplikasi Flutter yang mengintegrasikan WebView secara mendalam dengan fitur native Android/iOS. Fokus utamanya adalah menangani flow pembayaran yang kompleks, perizinan hardware, dan komunikasi bridge yang aman.
 
 ---
 
-## 2. Alur Startup & Inisialisasi
+## 🏗 Arsitektur Proyek
 
-1. **Entry Point (`main.dart`):** Aplikasi dimulai dengan membuat `DefaultAppConfig`.
-2. **Composition Root (`app.dart`):** Konfigurasi disuntikkan ke dalam widget `HybridWebViewPage`.
-3. **Startup Permissions (`HybridWebViewController`):**
-    * Begitu halaman dimuat, controller memicu `requestStartupPermissions`.
-    * **Proses Sekuensial:** Aplikasi meminta izin **Lokasi**, diikuti dengan izin **Kamera**.
-    * Status izin (Granted/Denied) disimpan dalam state dan ditampilkan di UI melalui `PermissionChip`.
-    * Terdapat `Future.delayed` singkat untuk memastikan dialog sistem muncul dengan stabil setelah UI siap.
+Aplikasi mengikuti pola **Feature-First Architecture** sederhana:
 
----
-
-## 3. Mekanisme Keamanan Navigasi
-
-Aplikasi menggunakan pendekatan "Walled Garden" untuk WebView Utama:
-
-1. **Whitelist Host (`AppConfig`):** Daftar host yang diizinkan (misal: `sambarav2.vercel.app`) dikonfigurasi melalui environment variable `WEBVIEW_ALLOWED_HOSTS`.
-2. **Navigation Guard (`WebNavigationGuard`):**
-    * Setiap kali user mengklik link, event `shouldOverrideUrlLoading` dipicu.
-    * Jika URL berada di luar whitelist (misal: `m.dana.id`), navigasi **DIBLOKIR** (`CANCEL`) secara otomatis.
-    * Hal ini mencegah WebView Utama memuat konten eksternal yang tidak terkendali.
+- `lib/config/`: Konfigurasi global, logging, dan env variables.
+- `lib/features/hybrid_webview/`: Fitur inti yang terdiri dari:
+  - `application/`: Controller (logika bisnis & koordinasi).
+  - `domain/`: Logika validasi dan guard navigasi.
+  - `presentation/`: UI Widget dan WebView.
 
 ---
 
-## 4. Universal Payment Bridge (Smart Navigation)
+## 🚀 Flow Utama & Fitur Unggulan
 
-Untuk mendukung provider pembayaran (DANA, ShopeePay, Finpay, dll) secara universal dengan UX yang mulus:
+### 1. JavaScript Bridge (SapawargaChannel)
 
-1. **Bridge Listener:** Flutter mendaftarkan listener JavaScript bernama `SapawargaChannel`.
-2. **Smart Routing (`_openInCustomTabs`):**
-    * **Direct App Launch:** Aplikasi pertama-tama mencoba membuka URL menggunakan `LaunchMode.externalNonBrowserApplication`. Jika aplikasi (misal: DANA) terinstal, ia akan langsung dibuka. Hal ini memastikan tombol *Back* kembali langsung ke aplikasi kita.
-    * **Custom Tabs Fallback:** Jika aplikasi tidak terinstal, sistem akan membuka **Chrome Custom Tabs** (Android) atau **SFSafariViewController** (iOS) menggunakan class `ChromeSafariBrowser`.
-3. **Zombie Tab Prevention:**
-    * Ketika pembayaran selesai dan Deep Link `pocapp://payment/return` diterima, controller secara otomatis memanggil `_browser.close()`.
-    * Hal ini memastikan tidak ada tab browser yang tertinggal (zombie) setelah user kembali ke aplikasi.
+Aplikasi menyediakan objek `SapawargaChannel` ke sisi Web.
 
----
+- **Trigger:** Web memanggil `window.SapawargaChannel.postMessage(url)`.
+- **Action:** App mendeteksi instruksi ini dan **WAJIB** membukanya di **Custom Tab** (Chrome Custom Tabs di Android / SFSafariViewController di iOS).
+- **Kegunaan:** Sangat direkomendasikan untuk flow DANA, ShopeePay, atau link eksternal yang butuh integrasi aplikasi lain.
 
-## 5. Komunikasi Balik (Deep Linking & Auto-Close)
+### 2. Smart Navigation Guard (Anti-Stuck)
 
-1. **Deep Link Listener:** Flutter mendengarkan skema URL `pocapp://payment/return`.
-2. **Secure Validation:**
-    * Memastikan skema (`pocapp`), host (`payment`), dan path (mengandung `return` atau `callback`) valid.
-3. **Cleanup & Callback:**
-    * Menutup instance `ChromeSafariBrowser` jika masih terbuka.
-    * Mengirimkan event JavaScript ke WebView:
+Menyelesaikan masalah klasik di mana user terjebak di halaman redirect pembayaran (VA/CC).
 
-    ```javascript
-    window.dispatchEvent(new Event('paymentCompleted'));
-    ```
+- **Teknik:** *Double-Buffer Host Tracking*.
+- **Cara Kerja:** App selalu mencatat domain internal terakhir. Jika user masuk ke domain bank (External Host) dan menekan tombol Back, App akan mendeteksi perbedaan host dan langsung memuat ulang halaman internal terakhir, melompati halaman redirector yang menjebak.
 
-4. **Reaction:** Aplikasi Web menerima event tersebut dan dapat melakukan pengecekan status transaksi ke server.
+### 3. Unified Startup Permissions
 
----
+App meminta izin Kamera dan Lokasi di awal (startup).
 
-## 6. Observabilitas & Debugging
+- **Proses:** WebView tidak akan dimuat sampai status perizinan jelas (Granted/Denied).
+- **Fallback:** Jika izin diberikan, WebView secara otomatis memberikan akses ke hardware saat diminta oleh JavaScript tanpa dialog tambahan yang mengganggu.
 
-* **Debug Tracker Overlay:** Menampilkan log operasional secara real-time di bawah WebView (URL navigasi, status bridge, error).
-* **Sequential Logging:** Setiap aksi dicatat dengan timestamp untuk memudahkan pelacakan bug sinkronisasi.
+### 4. Centralized Debug Tracker
+
+Panel log visual yang bisa muncul di layar HP.
+
+- **Teknis:** Menggunakan `ValueNotifier` statis di `AppLogger`.
+- **Kelebihan:** Log dari konsol JavaScript, Deep Link, dan sistem Native muncul di satu tempat yang sama. Tetap berfungsi di mode Release untuk mempermudah debugging lapangan.
 
 ---
 
-**Status Arsitektur:** 100/100 (Clean, Modular, Testable)
-**Terakhir Diperbarui:** 24 April 2026
+## 🛠 Hal-Hal Penting untuk Developer (Clone)
+
+### Cara Menjalankan
+
+Pastikan menggunakan `--dart-define` jika ingin mengubah URL tujuan:
+
+```bash
+flutter run --dart-define=PROD_BASE_URL=https://alamat-web-kamu.com
+```
+
+### Konfigurasi Bridge
+
+Semua detail teknis dikelola di `lib/config/app_config.dart`. Kamu bisa mengubah:
+
+- `bridgeName`: Nama objek window di JavaScript.
+- `deepLinkScheme`: Skema untuk kembali dari pembayaran (`pocapp://`).
+- `paymentEventName`: Nama event yang dikirim balik ke Web (`paymentCompleted`).
+
+### Keamanan
+
+Daftar domain yang diizinkan untuk dibuka di dalam WebView utama diatur via `WEBVIEW_ALLOWED_HOSTS` di `app_config.dart`. Domain di luar ini akan otomatis diblokir atau dialihkan.
+
+---
+
+## 📝 Catatan Integrasi Tim Web
+
+Untuk berkomunikasi dengan App, gunakan kode berikut di sisi Web:
+
+```javascript
+// Membuka Custom Tab (DANA/Shopee)
+window.SapawargaChannel.postMessage("https://link-pembayaran.com");
+
+// Mendengarkan status pembayaran selesai (setelah Custom Tab ditutup)
+window.addEventListener('paymentCompleted', function() {
+    console.log("Pembayaran selesai, silakan refresh status!");
+});
+```

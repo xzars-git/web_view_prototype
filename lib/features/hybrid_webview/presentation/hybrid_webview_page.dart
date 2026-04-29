@@ -3,21 +3,33 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../../../config/app_config.dart';
+import '../../../config/logger.dart';
 import '../application/hybrid_webview_controller.dart';
 import 'widgets/debug_tracker_overlay.dart';
 import 'widgets/permission_chip.dart';
 
 /// Halaman utama fitur Hybrid WebView.
 ///
-/// Mengintegrasikan InAppWebView dengan controller untuk menangani navigasi aman,
-/// komunikasi bridge dengan JS, dan perizinan sistem native.
+/// Widget ini merupakan entry point untuk menampilkan konten web di dalam aplikasi native.
+/// Mengintegrasikan [InAppWebView] dengan [HybridWebViewController] untuk menangani:
+/// 1. Navigasi aman (Navigation Guard)
+/// 2. Komunikasi Bridge (JavaScript Handlers)
+/// 3. Perizinan Hardware (Kamera & Lokasi)
+/// 4. Indikator Progress dan Debug Tracker
 class HybridWebViewPage extends StatefulWidget {
-  const HybridWebViewPage({super.key, required this.config, required this.initialEnvironment});
+  /// Membuat instance [HybridWebViewPage].
+  ///
+  /// Memerlukan [config] untuk pengaturan domain/bridge dan [initialEnvironment].
+  const HybridWebViewPage({
+    super.key, 
+    required this.config, 
+    required this.initialEnvironment,
+  });
 
   /// Injeksi konfigurasi aplikasi.
   final AppConfig config;
 
-  /// Environment awal (hanya PROD yang didukung saat ini).
+  /// Environment awal yang akan digunakan.
   final String initialEnvironment;
 
   @override
@@ -25,9 +37,10 @@ class HybridWebViewPage extends StatefulWidget {
 }
 
 class _HybridWebViewPageState extends State<HybridWebViewPage> {
+  /// Controller utama untuk mengelola logika WebView.
   late final HybridWebViewController _controller;
 
-  /// Flag untuk menampilkan/menyembunyikan Debug Tracker Overlay.
+  /// Status apakah panel Debug Tracker ditampilkan di layar.
   bool _showDebug = true;
 
   @override
@@ -36,7 +49,8 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     // Inisialisasi controller dengan konfigurasi yang disuntikkan.
     _controller = HybridWebViewController(config: widget.config);
 
-    // Menjalankan permintaan izin startup setelah frame pertama dirender.
+    // Menjalankan permintaan izin startup (Kamera & Lokasi) setelah frame pertama dirender.
+    // Hal ini menjamin konteks UI siap sebelum dialog sistem muncul.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _controller.requestStartupPermissions();
     });
@@ -44,202 +58,190 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
 
   @override
   void dispose() {
+    // Memastikan controller dibersihkan untuk mencegah kebocoran memori.
     _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // Mendengarkan perubahan state dari controller secara reaktif.
+    // Mendengarkan perubahan state dari controller secara reaktif menggunakan ValueListenableBuilder.
     return ValueListenableBuilder<HybridWebViewState>(
       valueListenable: _controller,
       builder: (context, state, _) {
         return PopScope(
+          // canPop: false mematikan navigasi back default sistem.
+          // Kita menghandle navigasi back secara manual via smartGoBack.
           canPop: false,
           onPopInvokedWithResult: (didPop, result) async {
             if (didPop) return;
+            // Pemicu navigasi back cerdas (melompati halaman redirect jika perlu).
             await _controller.smartGoBack();
           },
           child: Scaffold(
             appBar: AppBar(
-            title: Text(widget.config.appBarTitle),
-            leading: IconButton(
-              icon: const Icon(Icons.arrow_back),
-              onPressed: () async {
-                final controller = _controller.webViewController;
-                if (controller != null && await controller.canGoBack()) {
-                  await _controller.smartGoBack();
-                } else {
-                  if (context.mounted) Navigator.of(context).pop();
-                }
-              },
-            ),
-            actions: [
-              // Tombol toggle untuk Debug Tracker.
-              IconButton(
-                onPressed: () => setState(() => _showDebug = !_showDebug),
-                icon: Icon(_showDebug ? Icons.bug_report : Icons.bug_report_outlined),
-                tooltip: 'Toggle Debug Tracker',
+              title: Text(widget.config.appBarTitle),
+              leading: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () async {
+                  final controller = _controller.webViewController;
+                  // Jika WebView bisa kembali, gunakan smartGoBack.
+                  if (controller != null && await controller.canGoBack()) {
+                    await _controller.smartGoBack();
+                  } else {
+                    // Jika tidak bisa kembali di history web, tutup halaman native.
+                    if (context.mounted) Navigator.of(context).pop();
+                  }
+                },
               ),
-              // Tombol reload halaman utama.
-              IconButton(onPressed: _controller.reloadBasePage, icon: const Icon(Icons.refresh)),
-            ],
-          ),
-          body: Column(
-            children: [
-              // Header bar: Menampilkan indikator izin dan status operasional.
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                child: Row(
-                  children: [
-                    PermissionChip(label: 'Cam', granted: state.cameraGranted),
-                    const SizedBox(width: 4),
-                    PermissionChip(label: 'Loc', granted: state.locationGranted),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        state.status,
-                        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
+              actions: [
+                // Tombol toggle untuk menampilkan/menyembunyikan Debug Tracker Overlay.
+                IconButton(
+                  onPressed: () => setState(() => _showDebug = !_showDebug),
+                  icon: Icon(_showDebug ? Icons.bug_report : Icons.bug_report_outlined),
+                  tooltip: 'Toggle Debug Tracker',
                 ),
-              ),
-              const Divider(height: 1),
-              Expanded(
-                flex: 3,
-                child: _controller.isRequestingPermissions
-                    ? const Center(child: CircularProgressIndicator())
-                    : Stack(
-                        children: [
-                          // Widget WebView Inti.
-                          InAppWebView(
-                            initialUrlRequest: URLRequest(
-                              url: WebUri(_controller.effectiveWebViewUrl),
-                            ),
-                            initialUserScripts: UnmodifiableListView<UserScript>([
-                              _controller.bridgeUserScript,
-                            ]),
-                            initialSettings: InAppWebViewSettings(
-                              javaScriptEnabled: true,
-                              useShouldOverrideUrlLoading: true,
-                              geolocationEnabled: true,
-                              databaseEnabled: true,
-                              domStorageEnabled: true,
-                              mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
-                              mediaPlaybackRequiresUserGesture: false,
-                              supportMultipleWindows: false,
-                              javaScriptCanOpenWindowsAutomatically: false,
-                              // Optimalisasi untuk rendering halaman berat (Kartu Kredit/VA)
-                              useWideViewPort: true,
-                              loadWithOverviewMode: true,
-                              supportZoom: true,
-                              builtInZoomControls: true,
-                              displayZoomControls: false,
-                            ),
-                            onWebViewCreated: (controller) {
-                              print("DEBUG_UI: ✅ WebView Created");
-                              _controller.webViewController = controller;
-
-                              // Menambahkan handler untuk menginisialisasi bridge 'flutter_inappwebview' di JS.
-                              controller.addJavaScriptHandler(
-                                handlerName: 'initBridge',
-                                callback: (args) => {},
-                              );
-                            },
-                            // Trace saat page mulai load
-                            onLoadStart: (controller, url) {
-                              print("DEBUG_UI: 📍 onLoadStart -> $url");
-                              if (url != null) {
-                                _controller.updateLastSafeUrl(url.toString());
-                              }
-                              _controller.addDebugLog("[UI] onLoadStart: $url");
-                            },
-                            // Trace saat page selesai load
-                            onPageCommitVisible: (controller, url) {
-                              print("DEBUG_UI: 🎨 onPageCommitVisible -> Content visible");
-                              _controller.addDebugLog("[UI] onPageCommitVisible: Page rendered");
-                            },
-                            // Mencegah navigasi ke luar host aplikasi secara otomatis.
-                            shouldOverrideUrlLoading: (controller, navigationAction) async {
-                              final url = navigationAction.request.url?.toString() ?? 'unknown';
-                              print("DEBUG_UI: 🚦 shouldOverrideUrlLoading called -> $url");
-                              _controller.addDebugLog("[UI] shouldOverrideUrlLoading: $url");
-                              return _controller.handleNavigation(navigationAction);
-                            },
-                            // Trace saat page selesai loading
-                            onLoadStop: (controller, url) {
-                              print("DEBUG_UI: ✅ onLoadStop -> Page loaded successfully");
-                              _controller.addDebugLog("[UI] onLoadStop: Page load complete");
-                            },
-                            onLoadError: (controller, url, code, message) {
-                              print(
-                                "DEBUG_UI: ❌ onLoadError: Code=$code, Message=$message, URL=$url",
-                              );
-                              _controller.addDebugLog("[UI] ❌ onLoadError: $code - $message");
-                              _controller.updateStatus("Error: $message");
-                            },
-                            onLoadHttpError: (controller, url, statusCode, description) {
-                              print(
-                                "DEBUG_UI: 🔴 onLoadHttpError: $statusCode - $description @ $url",
-                              );
-                              _controller.addDebugLog(
-                                "[UI] 🔴 HTTP Error $statusCode: $description",
-                              );
-                              _controller.updateStatus("HTTP Error $statusCode");
-                            },
-                            // Capture console.log dari JavaScript
-                            onConsoleMessage: (controller, consoleMessage) {
-                              print("DEBUG_UI: 📱 JS Console: ${consoleMessage.message}");
-                              _controller.addDebugLog("[JS] ${consoleMessage.message}");
-                            },
-                            // Trace jika WebView render process crash
-                            onRenderProcessGone: (controller, detail) {
-                              print(
-                                "DEBUG_UI: ⚠️ onRenderProcessGone - WebView crashed! detail=$detail",
-                              );
-                              _controller.addDebugLog(
-                                "[UI] ⚠️ Render process gone (crash detected)",
-                              );
-                              _controller.updateStatus("Render Process Crashed");
-                            },
-                            // Memberikan akses hardware setelah validasi native di startup.
-                            onPermissionRequest: (controller, request) async {
-                              print("DEBUG_UI: 🔐 onPermissionRequest: ${request.resources}");
-                              _controller.addDebugLog(
-                                "[UI] Permission request: ${request.resources.join(', ')}",
-                              );
-                              return _controller.handleWebPermissionRequest(request);
-                            },
-                            // Memberikan akses lokasi setelah validasi native di startup.
-                            onGeolocationPermissionsShowPrompt: (controller, origin) async {
-                              print("DEBUG_UI: 📍 Geolocation request from: $origin");
-                              _controller.addDebugLog("[UI] Geolocation request: $origin");
-                              return _controller.handleGeolocationPrompt(origin);
-                            },
-                            // Mengupdate progres pemuatan halaman.
-                            onProgressChanged: (controller, progress) {
-                              print("DEBUG_UI: 📊 Progress: $progress%");
-                              _controller.updateProgress(progress / 100.0);
-                            },
-                          ),
-                          // Indikator progres pemuatan di bagian atas WebView.
-                          if (state.progress < 1)
-                            const Align(
-                              alignment: Alignment.topCenter,
-                              child: LinearProgressIndicator(minHeight: 2),
-                            ),
-                        ],
+                // Tombol reload untuk memuat ulang halaman utama dari awal.
+                IconButton(
+                  onPressed: _controller.reloadBasePage, 
+                  icon: const Icon(Icons.refresh),
+                ),
+              ],
+            ),
+            body: Column(
+              children: [
+                // Header bar: Menampilkan indikator izin Kamera/Lokasi dan status operasional.
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  child: Row(
+                    children: [
+                      PermissionChip(label: 'Cam', granted: state.cameraGranted),
+                      const SizedBox(width: 4),
+                      PermissionChip(label: 'Loc', granted: state.locationGranted),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          state.status,
+                          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-              ),
-              // Overlay panel untuk memantau log sistem secara real-time.
-              if (_showDebug) DebugTrackerOverlay(logs: state.logs),
-            ],
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  flex: 3,
+                  child: _controller.isRequestingPermissions
+                      ? const Center(child: CircularProgressIndicator())
+                      : Stack(
+                          children: [
+                            // Widget WebView Utama.
+                            InAppWebView(
+                              initialUrlRequest: URLRequest(
+                                url: WebUri(_controller.effectiveWebViewUrl),
+                              ),
+                              // Menyuntikkan JavaScript Bridge (SapawargaChannel) sebelum dokumen dimuat.
+                              initialUserScripts: UnmodifiableListView<UserScript>([
+                                _controller.bridgeUserScript,
+                              ]),
+                              initialSettings: InAppWebViewSettings(
+                                javaScriptEnabled: true,
+                                useShouldOverrideUrlLoading: true,
+                                geolocationEnabled: true,
+                                databaseEnabled: true,
+                                domStorageEnabled: true,
+                                mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+                                mediaPlaybackRequiresUserGesture: false,
+                                supportMultipleWindows: false,
+                                javaScriptCanOpenWindowsAutomatically: false,
+                                // Optimalisasi rendering untuk halaman eksternal yang berat.
+                                useWideViewPort: true,
+                                loadWithOverviewMode: true,
+                                supportZoom: true,
+                                builtInZoomControls: true,
+                                displayZoomControls: false,
+                              ),
+                              onWebViewCreated: (controller) {
+                                _controller.webViewController = controller;
+                                // Inisialisasi bridge sisi JS.
+                                controller.addJavaScriptHandler(
+                                  handlerName: 'initBridge',
+                                  callback: (args) => {},
+                                );
+                              },
+                              onLoadStart: (controller, url) {
+                                // Mencatat URL internal terakhir untuk keperluan navigasi 'Smart Back'.
+                                if (url != null) {
+                                  _controller.updateLastSafeUrl(url.toString());
+                                }
+                                AppLogger.d("[UI] onLoadStart: $url");
+                              },
+                              onPageCommitVisible: (controller, url) {
+                                AppLogger.d("[UI] onPageCommitVisible: Content rendered");
+                              },
+                              shouldOverrideUrlLoading: (controller, navigationAction) async {
+                                final url = navigationAction.request.url?.toString() ?? 'unknown';
+                                AppLogger.d("[UI] shouldOverrideUrlLoading: $url");
+                                // Delegasi validasi navigasi ke controller (Navigation Guard).
+                                return _controller.handleNavigation(navigationAction);
+                              },
+                              onLoadStop: (controller, url) {
+                                AppLogger.d("[UI] onLoadStop: Load complete");
+                              },
+                              onReceivedError: (controller, request, error) {
+                                AppLogger.d("[UI] ❌ Error: ${error.description}");
+                                _controller.updateStatus("Error: ${error.description}");
+                              },
+                              onReceivedHttpError: (controller, request, errorResponse) {
+                                AppLogger.d("[UI] 🔴 HTTP Error ${errorResponse.statusCode}");
+                                _controller.updateStatus("HTTP Error ${errorResponse.statusCode}");
+                              },
+                              onConsoleMessage: (controller, consoleMessage) {
+                                // Menangkap log dari konsol browser dan mengarahkannya ke logger app.
+                                AppLogger.d("[JS] ${consoleMessage.message}");
+                              },
+                              onRenderProcessGone: (controller, detail) {
+                                AppLogger.d("[UI] ⚠️ WebView Crash Detected!");
+                                _controller.updateStatus("WebView Crashed");
+                              },
+                              onPermissionRequest: (controller, request) async {
+                                // Menangani permintaan izin hardware dari Web (Kamera, Mic, dll).
+                                AppLogger.d("[UI] Web permission req: ${request.resources}");
+                                return _controller.handleWebPermissionRequest(request);
+                              },
+                              onGeolocationPermissionsShowPrompt: (controller, origin) async {
+                                // Menangani permintaan izin lokasi dari Web.
+                                AppLogger.d("[UI] Geolocation req from: $origin");
+                                return _controller.handleGeolocationPrompt(origin);
+                              },
+                              onProgressChanged: (controller, progress) {
+                                // Memperbarui indikator loading linear.
+                                _controller.updateProgress(progress / 100.0);
+                              },
+                            ),
+                            // Indikator progres pemuatan (Top Bar).
+                            if (state.progress < 1)
+                              const Align(
+                                alignment: Alignment.topCenter,
+                                child: LinearProgressIndicator(minHeight: 2),
+                              ),
+                          ],
+                        ),
+                ),
+                // Panel Debug Tracker: Mendengarkan AppLogger secara global dan reaktif.
+                if (_showDebug)
+                  ValueListenableBuilder<List<String>>(
+                    valueListenable: AppLogger.logsNotifier,
+                    builder: (context, logs, _) {
+                      return DebugTrackerOverlay(logs: logs);
+                    },
+                  ),
+              ],
+            ),
           ),
-        ),
-      );
-    },
-  );
-}
+        );
+      },
+    );
+  }
 }

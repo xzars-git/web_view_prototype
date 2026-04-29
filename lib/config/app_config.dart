@@ -1,3 +1,5 @@
+import 'logger.dart';
+
 /// Abstraksi untuk konfigurasi aplikasi.
 ///
 /// Digunakan untuk memisahkan detail implementasi konfigurasi (seperti
@@ -97,7 +99,7 @@ class DefaultAppConfig implements AppConfig {
     final url = isTargetUrlOverridden
         ? _targetUrlOverride.trim()
         : urlForEnvironment(currentEnvironment);
-    print("DEBUG_CONFIG: Final Target URL is $url");
+    AppLogger.d("CONFIG: Final Target URL is $url");
     return url;
   }
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../../../config/logger.dart';
 
 /// Widget overlay untuk menampilkan log sistem secara real-time.
 ///
@@ -14,7 +15,7 @@ class DebugTrackerOverlay extends StatelessWidget {
   void _copyLogsToClipboard() {
     final logsText = logs.join('\n');
     Clipboard.setData(ClipboardData(text: logsText));
-    print("DEBUG_TRACKER: ✅ Logs copied to clipboard (${logsText.length} chars)");
+    AppLogger.d("LOGS: Copied to clipboard (${logsText.length} chars)");
   }
 
   @override

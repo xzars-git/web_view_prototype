@@ -5,6 +5,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../config/app_config.dart';
+import '../../../config/logger.dart';
 import '../domain/web_navigation_guard.dart';
 import 'web_permission_service.dart';
 
@@ -30,7 +31,6 @@ class HybridWebViewState {
   final bool hasPermissionIssue;
   final bool cameraGranted;
   final bool locationGranted;
-  final List<String> logs;
 
   const HybridWebViewState({
     required this.status,
@@ -39,7 +39,6 @@ class HybridWebViewState {
     required this.hasPermissionIssue,
     this.cameraGranted = false,
     this.locationGranted = false,
-    this.logs = const [],
   });
 
   HybridWebViewState copyWith({
@@ -49,7 +48,6 @@ class HybridWebViewState {
     bool? hasPermissionIssue,
     bool? cameraGranted,
     bool? locationGranted,
-    List<String>? logs,
   }) {
     return HybridWebViewState(
       status: status ?? this.status,
@@ -58,7 +56,6 @@ class HybridWebViewState {
       hasPermissionIssue: hasPermissionIssue ?? this.hasPermissionIssue,
       cameraGranted: cameraGranted ?? this.cameraGranted,
       locationGranted: locationGranted ?? this.locationGranted,
-      logs: logs ?? this.logs,
     );
   }
 }
@@ -77,11 +74,10 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
            progress: 0,
            permissionState: StartupPermissionState.requesting,
            hasPermissionIssue: false,
-           logs: ['[System] App Initialized'],
          ),
        ) {
-    _addLog("[System] Controller Initialized");
-    _addLog("[Config] Target URL: $effectiveWebViewUrl");
+    AppLogger.d("[System] Controller Initialized");
+    AppLogger.d("[Config] Target URL: $effectiveWebViewUrl");
     _initBrowser();
     _initDeepLinks();
   }
@@ -113,7 +109,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   void _initBrowser() {
     _browser = _PaymentChromeBrowser(
       onClosedCallback: () {
-        _addLog("[Browser] Closed manually by user");
+        AppLogger.d("[Browser] Closed manually by user");
         _notifyPaymentCompleted();
         // Otomatis deteksi jika kita stuck di halaman redirect/pembayaran
         smartGoBack();
@@ -141,14 +137,14 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     final currentUrl = (await _webViewController?.getUrl())?.toString() ?? '';
     final canGoBack = await _webViewController!.canGoBack();
     
-    _addLog("[Nav] SmartBack attempt from: $currentUrl");
+    AppLogger.d("[Nav] SmartBack attempt from: $currentUrl");
 
     // Jika user berada di domain luar (VA/CC di Finpay/Bank)
     if (isExternalPage(currentUrl)) {
       // Kita prioritaskan balik ke halaman internal yang 'benar-benar aman' (sebelum redirector)
       final target = _lastSafeUrl ?? _currentInternalUrl;
       if (target != null) {
-        _addLog("[Nav] Stuck in external page (VA/CC), forcing jump to safe internal URL: $target");
+        AppLogger.d("[Nav] Stuck in external page (VA/CC), forcing jump to safe internal URL: $target");
         await _webViewController?.loadUrl(
           urlRequest: URLRequest(url: WebUri(target)),
         );
@@ -158,10 +154,10 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     
     // Jika masih di domain internal tapi canGoBack true
     if (canGoBack) {
-      _addLog("[Nav] Standard goBack");
+      AppLogger.d("[Nav] Standard goBack");
       await _webViewController!.goBack();
     } else {
-      _addLog("[Nav] No history to go back, closing page");
+      AppLogger.d("[Nav] No history to go back, closing page");
     }
   }
 
@@ -171,47 +167,39 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       // _lastSafeUrl akan menyimpan halaman SEBELUM halaman sekarang.
       if (_currentInternalUrl != null && _currentInternalUrl != url) {
         _lastSafeUrl = _currentInternalUrl;
-        _addLog("[Nav] Safe history updated. Last Safe: $_lastSafeUrl, Current: $url");
+        AppLogger.d("[Nav] Safe history updated. Last Safe: $_lastSafeUrl, Current: $url");
       }
       _currentInternalUrl = url;
     }
   }
 
   void _notifyPaymentCompleted() {
-    print("DEBUG_NOTIFY: 📢 Notifying Web: ${_config.paymentEventName}");
-    _addLog("[System] Notifying Web: ${_config.paymentEventName}");
+    AppLogger.d("[System] Notifying Web: ${_config.paymentEventName}");
     _webViewController?.evaluateJavascript(
       source: "window.dispatchEvent(new Event('${_config.paymentEventName}'));",
     );
-    print("DEBUG_NOTIFY: ✅ ${_config.paymentEventName} event sent");
   }
 
   /// Mendaftarkan handler JavaScript agar Web bisa memanggil fungsi Flutter.
   void _setupJavaScriptHandlers() {
-    print("DEBUG_BRIDGE: 🔧 [START] Setting up JavaScript handlers...");
+    AppLogger.d("[Bridge] Setting up JavaScript handlers...");
     _webViewController?.addJavaScriptHandler(
       handlerName: _config.bridgeName,
       callback: (args) {
-        print("DEBUG_BRIDGE: 📥 MESSAGE RECEIVED FROM WEB!");
-        print("DEBUG_BRIDGE: Number of arguments: ${args.length}");
-        
         if (args.isEmpty) {
-          print("DEBUG_BRIDGE: ⚠️ No data received in arguments");
-          _addLog("[Bridge] ⚠️ Received empty message");
+          AppLogger.d("[Bridge] ⚠️ Received empty message");
           return;
         }
 
         for (var i = 0; i < args.length; i++) {
           final arg = args[i];
-          print("DEBUG_BRIDGE: Arg[$i] Content: $arg (Type: ${arg.runtimeType})");
-          _addLog("[Bridge] Arg[$i]: $arg");
+          AppLogger.d("[Bridge] Arg[$i]: $arg");
         }
 
         _processIncomingMessage(args[0]);
       },
     );
-    print("DEBUG_BRIDGE: ✅ JavaScript handlers registered");
-    _addLog("[Bridge] JavaScript handlers registered");
+    AppLogger.d("[Bridge] JavaScript handlers registered");
   }
 
   /// Menyiapkan script bridge yang akan disuntikkan di awal pemuatan (document_start).
@@ -236,55 +224,34 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
   );
 
-  void _addLog(String message) {
-    if (kReleaseMode) return;
-    final now = DateTime.now();
-    final time =
-        "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
-    value = value.copyWith(logs: ["[$time] $message", ...value.logs.take(49)]);
-    print("DEBUG_LOG: $message");
-  }
-
   /// Public method untuk UI add debug log
   void addDebugLog(String message) {
-    _addLog(message);
+    AppLogger.d(message);
   }
 
   void _initDeepLinks() {
-    print("DEBUG_DEEPLINK: 🔗 Initializing deep link listener...");
+    AppLogger.d("[DeepLink] Initializing listener...");
     _appLinks = AppLinks();
     _linkSubscription = _appLinks.uriLinkStream.listen((uri) async {
-      print("DEBUG_DEEPLINK: 📨 Deep link received: $uri");
-      _addLog("[DeepLink] Received: $uri");
+      AppLogger.d("[DeepLink] Received: $uri");
 
       if (uri.scheme == _config.deepLinkScheme && uri.host == _config.deepLinkHost) {
         final path = uri.path.toLowerCase();
-        print("DEBUG_DEEPLINK: Payment return path detected: $path");
-
         if (path.contains('return') || path.contains('callback')) {
-          print("DEBUG_DEEPLINK: ✅ Payment return callback confirmed");
-          _addLog("[DeepLink] Payment return confirmed");
+          AppLogger.d("[DeepLink] Payment return confirmed");
 
           if (_browser.isOpened()) {
-            print("DEBUG_DEEPLINK: Closing Custom Tab browser...");
             await _browser.close();
-            _addLog("[DeepLink] Custom Tab closed");
+            AppLogger.d("[DeepLink] Custom Tab closed");
           }
 
-          print("DEBUG_DEEPLINK: Dispatching ${_config.paymentEventName} event to JS");
           _webViewController?.evaluateJavascript(
             source: "window.dispatchEvent(new Event('${_config.paymentEventName}'));",
           );
-          _addLog("[DeepLink] ${_config.paymentEventName} event dispatched");
-          print("DEBUG_DEEPLINK: ✅ Event dispatched successfully");
-        } else {
-          print("DEBUG_DEEPLINK: Unknown payment path: $path");
+          AppLogger.d("[DeepLink] ${_config.paymentEventName} event dispatched");
         }
-      } else {
-        print("DEBUG_DEEPLINK: Non-payment deep link: scheme=${uri.scheme}, host=${uri.host}");
       }
     });
-    print("DEBUG_DEEPLINK: ✅ Deep link listener initialized");
   }
 
   @override
@@ -306,22 +273,16 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   void updateStatus(String status) {
     value = value.copyWith(status: status);
-    _addLog("[Status] $status");
+    AppLogger.d("[Status] $status");
   }
 
   Future<void> requestStartupPermissions() async {
-    print("DEBUG_PERM: 🔐 [START] Requesting startup permissions...");
-    _addLog("[System] Requesting permissions");
+    AppLogger.d("[System] Requesting startup permissions...");
     await Future.delayed(const Duration(milliseconds: 500));
     try {
-      print("DEBUG_PERM: Calling permission service...");
       final outcome = await _permissionService.requestStartupPermissions();
-      print("DEBUG_PERM: Permission outcome: ${outcome.name}");
-
       final cam = await _permissionService.isCameraGranted();
       final loc = await _permissionService.isLocationGranted();
-      print("DEBUG_PERM: Camera granted: $cam");
-      print("DEBUG_PERM: Location granted: $loc");
 
       value = value.copyWith(
         cameraGranted: cam,
@@ -331,11 +292,9 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
             : StartupPermissionState.ready,
         hasPermissionIssue: outcome != StartupPermissionOutcome.granted,
       );
-      print("DEBUG_PERM: ✅ [END] Startup Permissions Ready");
-      _addLog("[System] Startup Permissions Ready (Camera: $cam, Location: $loc)");
-    } catch (e) {
-      print("DEBUG_PERM: ❌ Permission Request Error: $e");
-      _addLog("[Error] Permission Request: $e");
+      AppLogger.d("[System] Permissions Ready (Camera: $cam, Location: $loc)");
+    } catch (e, stack) {
+      AppLogger.e("Permission error", e, stack);
     }
   }
 
@@ -348,85 +307,57 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   }
 
   Future<void> reloadBasePage() async {
-    print("DEBUG_RELOAD: 🔄 Reloading base page...");
-    _addLog("[System] Reloading page");
-    if (_webViewController == null) {
-      print("DEBUG_RELOAD: ❌ WebViewController is null!");
-      return;
-    }
+    AppLogger.d("[System] Reloading base page");
+    if (_webViewController == null) return;
     await _webViewController?.loadUrl(
       urlRequest: URLRequest(url: WebUri.uri(Uri.parse(effectiveWebViewUrl))),
     );
-    print("DEBUG_RELOAD: ✅ Page reload command sent");
   }
 
   Future<NavigationActionPolicy> handleNavigation(NavigationAction navigationAction) async {
     final uri = navigationAction.request.url;
     final rawUrl = uri?.toString() ?? '';
-    print("DEBUG_NAV: 🔍 [START] handleNavigation called");
-    print("DEBUG_NAV: URL = $rawUrl");
-    print("DEBUG_NAV: isForMainFrame = ${navigationAction.isForMainFrame}");
+    AppLogger.d("[Nav] handleNavigation: $rawUrl");
 
-    if (rawUrl.isEmpty) {
-      print("DEBUG_NAV: ⚠️ Empty URL, allowing");
-      _addLog("[Nav] Empty URL, allowing");
-      return NavigationActionPolicy.ALLOW;
-    }
+    if (rawUrl.isEmpty) return NavigationActionPolicy.ALLOW;
 
     // 1. Tangani Deep Link (Skema non-HTTP seperti dana://, whatsapp://, dll)
     if (uri != null && !uri.scheme.startsWith('http')) {
-      print("DEBUG_NAV: 🔗 Non-HTTP scheme detected: ${uri.scheme}");
-      _addLog("[DeepLink] Detected scheme ${uri.scheme}, launching external app...");
+      AppLogger.d("[DeepLink] Launching external app for: ${uri.scheme}");
       launchUrl(uri, mode: LaunchMode.externalApplication);
-      print("DEBUG_NAV: ✅ External app launched");
       return NavigationActionPolicy.CANCEL;
     }
 
     // Navigasi non-main-frame tetap diizinkan untuk resource internal non-payment.
-    if (!navigationAction.isForMainFrame) {
-      print("DEBUG_NAV: 📦 Non-main-frame navigation, allowing");
-      _addLog("[Nav] Non-main-frame resource, allowing");
-      return NavigationActionPolicy.ALLOW;
-    }
+    if (!navigationAction.isForMainFrame) return NavigationActionPolicy.ALLOW;
 
-    print("DEBUG_NAV: 🎯 Evaluating with guard...");
     final handling = _navigationGuard.evaluate(rawUrl);
-    print("DEBUG_NAV: Guard result = ${handling.name}");
-    _addLog("[Nav] ${handling.name.toUpperCase()} -> $rawUrl");
+    AppLogger.d("[Nav] Guard: ${handling.name} -> $rawUrl");
 
     if (handling == NavigationHandling.block) {
-      print("DEBUG_NAV: 🛑 BLOCKED");
-      _addLog("[Guard] Blocked: $rawUrl");
+      AppLogger.d("[Guard] Blocked: $rawUrl");
       return NavigationActionPolicy.CANCEL;
     }
 
-    print("DEBUG_NAV: ✅ [END] Allowing navigation");
     return NavigationActionPolicy.ALLOW;
   }
 
   Future<void> _openInCustomTabs(String rawUrl) async {
-    print("DEBUG_CUSTOMTAB: 🎯 [START] Opening Custom Tab");
-    print("DEBUG_CUSTOMTAB: Raw URL: $rawUrl");
+    AppLogger.d("[Bridge] Opening Custom Tab for: $rawUrl");
 
     final uri = Uri.tryParse(rawUrl.trim());
     if (uri == null) {
-      print("DEBUG_CUSTOMTAB: ❌ Invalid URI, cannot parse");
-      _addLog("[Bridge] ❌ Invalid URL format");
+      AppLogger.d("[Bridge] ❌ Invalid URL format");
       return;
     }
-    print("DEBUG_CUSTOMTAB: ✅ URI parsed successfully");
 
     try {
       if (!uri.scheme.startsWith('http')) {
-        print("DEBUG_CUSTOMTAB: 🔗 Non-HTTP scheme, launching external app: ${uri.scheme}");
-        _addLog("[Bridge] Launching external app (non-http): $rawUrl");
+        AppLogger.d("[Bridge] Launching external app (non-http): $rawUrl");
         await launchUrl(uri, mode: LaunchMode.externalApplication);
-        print("DEBUG_CUSTOMTAB: ✅ External app launched");
         return;
       }
 
-      print("DEBUG_CUSTOMTAB: 📱 Opening Chrome Custom Tab...");
-      _addLog("[Bridge] Opening Custom Tab: $rawUrl");
       await _browser.open(
         url: WebUri.uri(uri),
         settings: ChromeSafariBrowserSettings(
@@ -435,44 +366,19 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
           noHistory: false,
         ),
       );
-      print("DEBUG_CUSTOMTAB: ✅ Custom Tab opened successfully");
-    } catch (e) {
-      print("DEBUG_CUSTOMTAB: ❌ Error opening Custom Tab: $e");
-      _addLog("[Bridge Error] $e");
-      print("DEBUG_CUSTOMTAB: Falling back to external app...");
+    } catch (e, stack) {
+      AppLogger.e("Custom Tab error", e, stack);
       await launchUrl(uri, mode: LaunchMode.externalApplication);
-      print("DEBUG_CUSTOMTAB: ✅ Fallback to external app completed");
     }
-    print("DEBUG_CUSTOMTAB: ✅ [END] Custom Tab operation completed");
   }
 
   void _processIncomingMessage(dynamic data) {
-    print("DEBUG_MESSAGE: ⚙️ [START] Processing message from bridge");
     final String url = data.toString().trim();
+    if (url.isEmpty) return;
     
-    if (url.isEmpty) {
-      print("DEBUG_MESSAGE: ❌ Aborting - URL is empty");
-      _addLog("[Bridge] ❌ Received empty URL");
-      return;
-    }
-
-    print("DEBUG_MESSAGE: 🚦 URL Received: $url");
-    
-    // Log hasil evaluasi guard untuk informasi saja
-    final handling = _navigationGuard.evaluate(url);
-    print("DEBUG_MESSAGE: 🛡️ Guard Info: ${handling.name}");
-
-    // Jika dipanggil via Bridge, kita anggap ini instruksi EKSPLISIT untuk membuka Custom Tab,
-    // meskipun URL tersebut masuk dalam whitelist 'allowWebView' (seperti Finpay).
-    print("DEBUG_MESSAGE: 📱 Bridge call is explicit. Triggering Custom Tab...");
-    _addLog("[Bridge] Triggering Custom Tab for: $url");
-    
-    // Hentikan loading di WebView utama agar tidak double loading
+    AppLogger.d("[Bridge] Triggering Custom Tab via postMessage");
     _webViewController?.stopLoading();
-    print("DEBUG_MESSAGE: 🛑 Main WebView loading stopped");
-    
     _openInCustomTabs(url);
-    print("DEBUG_MESSAGE: ✅ [END] Message processed");
   }
 
   void handleWebMessage(WebMessage? message) {

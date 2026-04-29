@@ -1,4 +1,5 @@
 import '../../../config/app_config.dart';
+import '../../../config/logger.dart';
 
 /// Jenis penanganan untuk navigasi URL di WebView.
 enum NavigationHandling {
@@ -31,7 +32,7 @@ class WebNavigationGuard {
 
     // 1. WHITELIST: Izinkan jika domain ada di allow list
     if (_config.isWebViewNavigationAllowed(rawUrl)) {
-      print("DEBUG_GUARD: ✅ URL passed whitelist check");
+      AppLogger.d("GUARD: ✅ URL passed whitelist check");
       return NavigationHandling.allowWebView;
     }
 
@@ -48,12 +49,12 @@ class WebNavigationGuard {
 
     final lowerUrl = rawUrl.toLowerCase();
     if (paymentKeywords.any((keyword) => lowerUrl.contains(keyword))) {
-      print("DEBUG_GUARD: ✅ URL passed payment tolerance check");
+      AppLogger.d("GUARD: ✅ URL passed payment tolerance check");
       return NavigationHandling.allowWebView;
     }
 
     // 3. BLOCK: Semua URL lain yang tidak masuk kategori di atas
-    print("DEBUG_GUARD: 🛑 URL BLOCKED - not in whitelist or payment keywords");
+    AppLogger.d("GUARD: 🛑 URL BLOCKED - not in whitelist or payment keywords");
     return NavigationHandling.block;
   }
 }
