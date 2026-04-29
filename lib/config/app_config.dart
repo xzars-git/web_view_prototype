@@ -12,6 +12,21 @@ abstract class AppConfig {
   /// URL tujuan utama yang sudah diformat dengan token.
   String get targetUrl;
 
+  /// Nama bridge untuk komunikasi JS-Flutter.
+  String get bridgeName;
+
+  /// Skema deep link untuk aplikasi ini.
+  String get deepLinkScheme;
+
+  /// Host deep link untuk memproses kembalinya pembayaran.
+  String get deepLinkHost;
+
+  /// Nama event JavaScript yang dikirim ke Web saat pembayaran selesai.
+  String get paymentEventName;
+
+  /// Judul halaman utama WebView.
+  String get appBarTitle;
+
   /// Status apakah URL ditimpa secara manual via environment variable.
   bool get isTargetUrlOverridden;
 
@@ -33,6 +48,21 @@ class DefaultAppConfig implements AppConfig {
 
   @override
   String get prodEnv => 'prod';
+
+  @override
+  String get bridgeName => 'SapawargaChannel';
+
+  @override
+  String get deepLinkScheme => 'pocapp';
+
+  @override
+  String get deepLinkHost => 'payment';
+
+  @override
+  String get paymentEventName => 'paymentCompleted';
+
+  @override
+  String get appBarTitle => 'Hybrid WebView';
 
   // URL dasar produksi, disuntikkan via PROD_BASE_URL.
   static const String _prodBaseUrl = String.fromEnvironment(

@@ -93,6 +93,12 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   InAppWebViewController? _webViewController;
   InAppWebViewController? get webViewController => _webViewController;
 
+  /// URL internal yang sedang aktif.
+  String? _currentInternalUrl;
+
+  /// URL internal sebelum yang aktif (Halaman asal sebelum proses pembayaran dimulai).
+  String? _lastSafeUrl;
+
   set webViewController(InAppWebViewController? controller) {
     _webViewController = controller;
     if (_webViewController != null) {
@@ -109,24 +115,82 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       onClosedCallback: () {
         _addLog("[Browser] Closed manually by user");
         _notifyPaymentCompleted();
+        // Otomatis deteksi jika kita stuck di halaman redirect/pembayaran
+        smartGoBack();
       },
     );
   }
 
+  /// Menentukan apakah URL saat ini berada di luar domain utama aplikasi.
+  bool isExternalPage(String url) {
+    try {
+      final currentUri = Uri.parse(url);
+      final baseUri = Uri.parse(_config.targetUrl);
+      
+      // Jika host berbeda dan bukan kosong, anggap sebagai halaman eksternal (pembayaran/bank)
+      return currentUri.host.isNotEmpty && currentUri.host != baseUri.host;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Fungsi cerdas untuk kembali: Jika di halaman luar (pembayaran), lompat ke halaman aman terakhir.
+  Future<void> smartGoBack() async {
+    if (_webViewController == null) return;
+
+    final currentUrl = (await _webViewController?.getUrl())?.toString() ?? '';
+    final canGoBack = await _webViewController!.canGoBack();
+    
+    _addLog("[Nav] SmartBack attempt from: $currentUrl");
+
+    // Jika user berada di domain luar (VA/CC di Finpay/Bank)
+    if (isExternalPage(currentUrl)) {
+      // Kita prioritaskan balik ke halaman internal yang 'benar-benar aman' (sebelum redirector)
+      final target = _lastSafeUrl ?? _currentInternalUrl;
+      if (target != null) {
+        _addLog("[Nav] Stuck in external page (VA/CC), forcing jump to safe internal URL: $target");
+        await _webViewController?.loadUrl(
+          urlRequest: URLRequest(url: WebUri(target)),
+        );
+        return;
+      }
+    } 
+    
+    // Jika masih di domain internal tapi canGoBack true
+    if (canGoBack) {
+      _addLog("[Nav] Standard goBack");
+      await _webViewController!.goBack();
+    } else {
+      _addLog("[Nav] No history to go back, closing page");
+    }
+  }
+
+  void updateLastSafeUrl(String url) {
+    if (!isExternalPage(url)) {
+      // Jika URL internal berubah, kita geser history-nya.
+      // _lastSafeUrl akan menyimpan halaman SEBELUM halaman sekarang.
+      if (_currentInternalUrl != null && _currentInternalUrl != url) {
+        _lastSafeUrl = _currentInternalUrl;
+        _addLog("[Nav] Safe history updated. Last Safe: $_lastSafeUrl, Current: $url");
+      }
+      _currentInternalUrl = url;
+    }
+  }
+
   void _notifyPaymentCompleted() {
-    print("DEBUG_NOTIFY: 📢 Notifying Web: paymentCompleted");
-    _addLog("[System] Notifying Web: paymentCompleted");
+    print("DEBUG_NOTIFY: 📢 Notifying Web: ${_config.paymentEventName}");
+    _addLog("[System] Notifying Web: ${_config.paymentEventName}");
     _webViewController?.evaluateJavascript(
-      source: "window.dispatchEvent(new Event('paymentCompleted'));",
+      source: "window.dispatchEvent(new Event('${_config.paymentEventName}'));",
     );
-    print("DEBUG_NOTIFY: ✅ paymentCompleted event sent");
+    print("DEBUG_NOTIFY: ✅ ${_config.paymentEventName} event sent");
   }
 
   /// Mendaftarkan handler JavaScript agar Web bisa memanggil fungsi Flutter.
   void _setupJavaScriptHandlers() {
     print("DEBUG_BRIDGE: 🔧 [START] Setting up JavaScript handlers...");
     _webViewController?.addJavaScriptHandler(
-      handlerName: 'SapawargaChannel',
+      handlerName: _config.bridgeName,
       callback: (args) {
         print("DEBUG_BRIDGE: 📥 MESSAGE RECEIVED FROM WEB!");
         print("DEBUG_BRIDGE: Number of arguments: ${args.length}");
@@ -151,18 +215,18 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   }
 
   /// Menyiapkan script bridge yang akan disuntikkan di awal pemuatan (document_start).
-  /// Ini menjamin objek SapawargaChannel tersedia sebelum Web berjalan.
+  /// Ini menjamin objek bridge tersedia sebelum Web berjalan.
   UserScript get bridgeUserScript => UserScript(
-    groupName: "bridge",
+    groupName: _config.bridgeName.toLowerCase(),
     source: """
       (function() {
-        window.SapawargaChannel = {
+        window.${_config.bridgeName} = {
           postMessage: function(message) {
             if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-                window.flutter_inappwebview.callHandler('SapawargaChannel', message);
+                window.flutter_inappwebview.callHandler('${_config.bridgeName}', message);
             } else {
                 window.addEventListener('flutterInAppWebViewPlatformReady', function(event) {
-                    window.flutter_inappwebview.callHandler('SapawargaChannel', message);
+                    window.flutter_inappwebview.callHandler('${_config.bridgeName}', message);
                 });
             }
           }
@@ -193,7 +257,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       print("DEBUG_DEEPLINK: 📨 Deep link received: $uri");
       _addLog("[DeepLink] Received: $uri");
 
-      if (uri.scheme == 'pocapp' && uri.host == 'payment') {
+      if (uri.scheme == _config.deepLinkScheme && uri.host == _config.deepLinkHost) {
         final path = uri.path.toLowerCase();
         print("DEBUG_DEEPLINK: Payment return path detected: $path");
 
@@ -207,11 +271,11 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
             _addLog("[DeepLink] Custom Tab closed");
           }
 
-          print("DEBUG_DEEPLINK: Dispatching paymentCompleted event to JS");
+          print("DEBUG_DEEPLINK: Dispatching ${_config.paymentEventName} event to JS");
           _webViewController?.evaluateJavascript(
-            source: "window.dispatchEvent(new Event('paymentCompleted'));",
+            source: "window.dispatchEvent(new Event('${_config.paymentEventName}'));",
           );
-          _addLog("[DeepLink] paymentCompleted event dispatched");
+          _addLog("[DeepLink] ${_config.paymentEventName} event dispatched");
           print("DEBUG_DEEPLINK: ✅ Event dispatched successfully");
         } else {
           print("DEBUG_DEEPLINK: Unknown payment path: $path");
@@ -315,20 +379,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       _addLog("[DeepLink] Detected scheme ${uri.scheme}, launching external app...");
       launchUrl(uri, mode: LaunchMode.externalApplication);
       print("DEBUG_NAV: ✅ External app launched");
-      return NavigationActionPolicy.CANCEL;
-    }
-
-    // Prioritas utama: URL payment tidak boleh sempat lanjut di WebView.
-    final lowerUrl = rawUrl.toLowerCase();
-    final isAutoBridgeUrl =
-        lowerUrl.contains('dana.id') ||
-        lowerUrl.contains('shopee.co.id') ||
-        lowerUrl.contains('shopeepay');
-    if (isAutoBridgeUrl) {
-      print("DEBUG_NAV: 💳 PAYMENT URL DETECTED - divert to Custom Tab");
-      _addLog("[Guard] Payment URL intercepted before WebView load");
-      await _openInCustomTabs(rawUrl);
-      print("DEBUG_NAV: ✅ Custom Tab opened, cancelling WebView navigation");
       return NavigationActionPolicy.CANCEL;
     }
 

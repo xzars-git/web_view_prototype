@@ -54,9 +54,26 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     return ValueListenableBuilder<HybridWebViewState>(
       valueListenable: _controller,
       builder: (context, state, _) {
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Hybrid WebView'),
+        return PopScope(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, result) async {
+            if (didPop) return;
+            await _controller.smartGoBack();
+          },
+          child: Scaffold(
+            appBar: AppBar(
+            title: Text(widget.config.appBarTitle),
+            leading: IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () async {
+                final controller = _controller.webViewController;
+                if (controller != null && await controller.canGoBack()) {
+                  await _controller.smartGoBack();
+                } else {
+                  if (context.mounted) Navigator.of(context).pop();
+                }
+              },
+            ),
             actions: [
               // Tombol toggle untuk Debug Tracker.
               IconButton(
@@ -134,6 +151,9 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                             // Trace saat page mulai load
                             onLoadStart: (controller, url) {
                               print("DEBUG_UI: 📍 onLoadStart -> $url");
+                              if (url != null) {
+                                _controller.updateLastSafeUrl(url.toString());
+                              }
                               _controller.addDebugLog("[UI] onLoadStart: $url");
                             },
                             // Trace saat page selesai load
@@ -217,8 +237,9 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
               if (_showDebug) DebugTrackerOverlay(logs: state.logs),
             ],
           ),
-        );
-      },
-    );
-  }
+        ),
+      );
+    },
+  );
+}
 }
