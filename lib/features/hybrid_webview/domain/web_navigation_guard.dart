@@ -6,55 +6,34 @@ enum NavigationHandling {
   /// Mengizinkan pemuatan di dalam WebView utama.
   allowWebView,
 
-  /// Memblokir pemuatan URL (untuk host eksternal yang tidak dikenal).
-  block,
+  /// Mengalihkan navigasi ke Custom Tab (untuk host eksternal/pembayaran).
+  openInCustomTab,
 }
 
 /// Domain Logic untuk keamanan navigasi WebView.
-///
-/// Evaluasi URL berdasarkan:
-/// 1. Whitelist domain resmi (dari AppConfig)
-/// 2. Payment tolerance keywords (untuk 3D Secure bank redirects)
-/// 3. Block semuanya yang tidak memenuhi kriteria di atas
 class WebNavigationGuard {
   final AppConfig _config;
 
   const WebNavigationGuard({required AppConfig config}) : _config = config;
 
-  /// Mengevaluasi URL untuk navigasi yang aman.
+  /// Mengevaluasi URL untuk menentukan tindakan navigasi.
   NavigationHandling evaluate(String rawUrl) {
     if (rawUrl.isEmpty) {
       return NavigationHandling.allowWebView;
     }
 
     final uri = Uri.tryParse(rawUrl);
-    if (uri == null) return NavigationHandling.block;
+    if (uri == null) return NavigationHandling.openInCustomTab;
 
-    // 1. WHITELIST: Izinkan jika domain ada di allow list
+    // 1. Jika Host masuk dalam Whitelist (Domain utama/subdomain), izinkan di WebView.
     if (_config.isWebViewNavigationAllowed(rawUrl)) {
-      AppLogger.d("GUARD: ✅ URL passed whitelist check");
+      AppLogger.d("GUARD: ✅ Whitelisted host, allowing in WebView");
       return NavigationHandling.allowWebView;
     }
 
-    // 2. PAYMENT TOLERANCE: Izinkan payment gateway & 3D Secure redirects
-    final paymentKeywords = [
-      'finpay',
-      '3dsecure',
-      'verifypass',
-      'callback',
-      'api.bni',
-      'mandiri.co.id',
-      'klikbca',
-    ];
-
-    final lowerUrl = rawUrl.toLowerCase();
-    if (paymentKeywords.any((keyword) => lowerUrl.contains(keyword))) {
-      AppLogger.d("GUARD: ✅ URL passed payment tolerance check");
-      return NavigationHandling.allowWebView;
-    }
-
-    // 3. BLOCK: Semua URL lain yang tidak masuk kategori di atas
-    AppLogger.d("GUARD: 🛑 URL BLOCKED - not in whitelist or payment keywords");
-    return NavigationHandling.block;
+    // 2. Jika Host di luar domain utama, otomatis anggap butuh Custom Tab (Anti-Stuck).
+    // Ini menangani DANA, Shopee, atau link bank tanpa perlu hardcode namanya.
+    AppLogger.d("GUARD: 📱 External host detected, diverting to Custom Tab");
+    return NavigationHandling.openInCustomTab;
   }
 }

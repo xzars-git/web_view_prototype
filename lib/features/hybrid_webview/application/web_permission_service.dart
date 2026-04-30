@@ -28,12 +28,21 @@ class GeolocationDecision {
 
 /// Service untuk menangani interaksi dengan API perizinan native (Android/iOS).
 class WebPermissionService {
+  final ph.Permission _locationPermission;
+  final ph.Permission _cameraPermission;
+
+  WebPermissionService({
+    ph.Permission? locationPermission,
+    ph.Permission? cameraPermission,
+  })  : _locationPermission = locationPermission ?? ph.Permission.locationWhenInUse,
+        _cameraPermission = cameraPermission ?? ph.Permission.camera;
+
   /// Meminta izin kamera dan lokasi dari sistem operasi secara sekuensial.
   Future<StartupPermissionOutcome> requestStartupPermissions() async {
     try {
       // Meminta izin satu per satu agar dialog sistem muncul secara berurutan.
-      final locationStatus = await ph.Permission.locationWhenInUse.request();
-      final cameraStatus = await ph.Permission.camera.request();
+      final locationStatus = await _locationPermission.request();
+      final cameraStatus = await _cameraPermission.request();
 
       if (_isPermanentOrRestricted(cameraStatus) || _isPermanentOrRestricted(locationStatus)) {
         return StartupPermissionOutcome.permanentlyDenied;
@@ -53,13 +62,13 @@ class WebPermissionService {
 
   /// Mengecek apakah izin kamera saat ini diberikan.
   Future<bool> isCameraGranted() async {
-    final status = await ph.Permission.camera.status;
+    final status = await _cameraPermission.status;
     return status.isGranted;
   }
 
   /// Mengecek apakah izin lokasi saat ini diberikan.
   Future<bool> isLocationGranted() async {
-    final status = await ph.Permission.locationWhenInUse.status;
+    final status = await _locationPermission.status;
     return status.isGranted;
   }
 

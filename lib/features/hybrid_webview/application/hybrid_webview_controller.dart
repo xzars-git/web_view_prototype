@@ -9,21 +9,17 @@ import '../../../config/logger.dart';
 import '../domain/web_navigation_guard.dart';
 import 'web_permission_service.dart';
 
-/// Status siklus hidup perizinan aplikasi saat startup.
 enum StartupPermissionState { requesting, ready, permanentlyDenied }
 
 class _PaymentChromeBrowser extends ChromeSafariBrowser {
   _PaymentChromeBrowser({required this.onClosedCallback});
-
   final VoidCallback onClosedCallback;
-
   @override
   void onClosed() {
     onClosedCallback();
   }
 }
 
-/// Representasi state untuk fitur Hybrid WebView.
 class HybridWebViewState {
   final String status;
   final double progress;
@@ -65,6 +61,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     required AppConfig config,
     WebPermissionService? permissionService,
     WebNavigationGuard? navigationGuard,
+    ChromeSafariBrowser? browser,
   }) : _config = config,
        _permissionService = permissionService ?? WebPermissionService(),
        _navigationGuard = navigationGuard ?? WebNavigationGuard(config: config),
@@ -77,8 +74,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
          ),
        ) {
     AppLogger.d("[System] Controller Initialized");
-    AppLogger.d("[Config] Target URL: $effectiveWebViewUrl");
-    _initBrowser();
+    _initBrowser(browser);
     _initDeepLinks();
   }
 
@@ -89,10 +85,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   InAppWebViewController? _webViewController;
   InAppWebViewController? get webViewController => _webViewController;
 
-  /// URL internal yang sedang aktif.
   String? _currentInternalUrl;
-
-  /// URL internal sebelum yang aktif (Halaman asal sebelum proses pembayaran dimulai).
   String? _lastSafeUrl;
 
   set webViewController(InAppWebViewController? controller) {
@@ -106,45 +99,37 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   StreamSubscription<Uri>? _linkSubscription;
   late final ChromeSafariBrowser _browser;
 
-  void _initBrowser() {
-    _browser = _PaymentChromeBrowser(
+  void _initBrowser([ChromeSafariBrowser? browser]) {
+    _browser = browser ?? _PaymentChromeBrowser(
       onClosedCallback: () {
         AppLogger.d("[Browser] Closed manually by user");
         _notifyPaymentCompleted();
-        // Otomatis deteksi jika kita stuck di halaman redirect/pembayaran
         smartGoBack();
       },
     );
   }
 
-  /// Menentukan apakah URL saat ini berada di luar domain utama aplikasi.
   bool isExternalPage(String url) {
     try {
       final currentUri = Uri.parse(url);
       final baseUri = Uri.parse(_config.targetUrl);
-      
-      // Jika host berbeda dan bukan kosong, anggap sebagai halaman eksternal (pembayaran/bank)
       return currentUri.host.isNotEmpty && currentUri.host != baseUri.host;
     } catch (_) {
       return false;
     }
   }
 
-  /// Fungsi cerdas untuk kembali: Jika di halaman luar (pembayaran), lompat ke halaman aman terakhir.
   Future<void> smartGoBack() async {
     if (_webViewController == null) return;
-
     final currentUrl = (await _webViewController?.getUrl())?.toString() ?? '';
     final canGoBack = await _webViewController!.canGoBack();
     
     AppLogger.d("[Nav] SmartBack attempt from: $currentUrl");
 
-    // Jika user berada di domain luar (VA/CC di Finpay/Bank)
     if (isExternalPage(currentUrl)) {
-      // Kita prioritaskan balik ke halaman internal yang 'benar-benar aman' (sebelum redirector)
       final target = _lastSafeUrl ?? _currentInternalUrl;
       if (target != null) {
-        AppLogger.d("[Nav] Stuck in external page (VA/CC), forcing jump to safe internal URL: $target");
+        AppLogger.d("[Nav] Forcing return to internal safe URL: $target");
         await _webViewController?.loadUrl(
           urlRequest: URLRequest(url: WebUri(target)),
         );
@@ -152,22 +137,17 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       }
     } 
     
-    // Jika masih di domain internal tapi canGoBack true
     if (canGoBack) {
       AppLogger.d("[Nav] Standard goBack");
       await _webViewController!.goBack();
-    } else {
-      AppLogger.d("[Nav] No history to go back, closing page");
     }
   }
 
   void updateLastSafeUrl(String url) {
     if (!isExternalPage(url)) {
-      // Jika URL internal berubah, kita geser history-nya.
-      // _lastSafeUrl akan menyimpan halaman SEBELUM halaman sekarang.
       if (_currentInternalUrl != null && _currentInternalUrl != url) {
         _lastSafeUrl = _currentInternalUrl;
-        AppLogger.d("[Nav] Safe history updated. Last Safe: $_lastSafeUrl, Current: $url");
+        AppLogger.d("[Nav] Safe history updated: $_lastSafeUrl");
       }
       _currentInternalUrl = url;
     }
@@ -180,75 +160,53 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     );
   }
 
-  /// Mendaftarkan handler JavaScript agar Web bisa memanggil fungsi Flutter.
   void _setupJavaScriptHandlers() {
     AppLogger.d("[Bridge] Setting up JavaScript handlers...");
     _webViewController?.addJavaScriptHandler(
       handlerName: _config.bridgeName,
       callback: (args) {
-        if (args.isEmpty) {
-          AppLogger.d("[Bridge] ⚠️ Received empty message");
-          return;
-        }
-
-        for (var i = 0; i < args.length; i++) {
-          final arg = args[i];
-          AppLogger.d("[Bridge] Arg[$i]: $arg");
-        }
-
+        if (args.isEmpty) return;
         _processIncomingMessage(args[0]);
       },
     );
-    AppLogger.d("[Bridge] JavaScript handlers registered");
   }
 
-  /// Menyiapkan script bridge yang akan disuntikkan di awal pemuatan (document_start).
-  /// Ini menjamin objek bridge tersedia sebelum Web berjalan.
   UserScript get bridgeUserScript => UserScript(
     groupName: _config.bridgeName.toLowerCase(),
     source: """
       (function() {
-        window.${_config.bridgeName} = {
+        var bridgeName = '${_config.bridgeName}';
+        window[bridgeName] = {
           postMessage: function(message) {
+            console.log('[Bridge] ' + bridgeName + '.postMessage called');
             if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-                window.flutter_inappwebview.callHandler('${_config.bridgeName}', message);
+                window.flutter_inappwebview.callHandler(bridgeName, message);
+                return true; 
             } else {
                 window.addEventListener('flutterInAppWebViewPlatformReady', function(event) {
-                    window.flutter_inappwebview.callHandler('${_config.bridgeName}', message);
+                    window.flutter_inappwebview.callHandler(bridgeName, message);
                 });
+                return true;
             }
           }
         };
+        console.log('[Bridge] ' + bridgeName + ' initialized');
       })();
     """,
     injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
   );
 
-  /// Public method untuk UI add debug log
-  void addDebugLog(String message) {
-    AppLogger.d(message);
-  }
+  void addDebugLog(String message) => AppLogger.d(message);
 
   void _initDeepLinks() {
-    AppLogger.d("[DeepLink] Initializing listener...");
     _appLinks = AppLinks();
     _linkSubscription = _appLinks.uriLinkStream.listen((uri) async {
-      AppLogger.d("[DeepLink] Received: $uri");
-
       if (uri.scheme == _config.deepLinkScheme && uri.host == _config.deepLinkHost) {
-        final path = uri.path.toLowerCase();
-        if (path.contains('return') || path.contains('callback')) {
-          AppLogger.d("[DeepLink] Payment return confirmed");
-
-          if (_browser.isOpened()) {
-            await _browser.close();
-            AppLogger.d("[DeepLink] Custom Tab closed");
-          }
-
+        if (uri.path.contains('return') || uri.path.contains('callback')) {
+          if (_browser.isOpened()) await _browser.close();
           _webViewController?.evaluateJavascript(
             source: "window.dispatchEvent(new Event('${_config.paymentEventName}'));",
           );
-          AppLogger.d("[DeepLink] ${_config.paymentEventName} event dispatched");
         }
       }
     });
@@ -261,23 +219,15 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   }
 
   String get effectiveWebViewUrl => _config.targetUrl;
-
   bool get isRequestingPermissions => value.permissionState == StartupPermissionState.requesting;
-  bool get isPermanentlyDenied => value.permissionState == StartupPermissionState.permanentlyDenied;
-  bool get showRetryPermissionButton =>
-      value.permissionState == StartupPermissionState.ready && value.hasPermissionIssue;
 
-  void updateProgress(double progress) {
-    value = value.copyWith(progress: progress);
-  }
-
+  void updateProgress(double progress) => value = value.copyWith(progress: progress);
   void updateStatus(String status) {
     value = value.copyWith(status: status);
     AppLogger.d("[Status] $status");
   }
 
   Future<void> requestStartupPermissions() async {
-    AppLogger.d("[System] Requesting startup permissions...");
     await Future.delayed(const Duration(milliseconds: 500));
     try {
       final outcome = await _permissionService.requestStartupPermissions();
@@ -287,12 +237,14 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       value = value.copyWith(
         cameraGranted: cam,
         locationGranted: loc,
+        status: outcome == StartupPermissionOutcome.permanentlyDenied
+            ? 'Izin ditolak permanen. Silakan cek pengaturan.'
+            : 'Siap',
         permissionState: outcome == StartupPermissionOutcome.permanentlyDenied
             ? StartupPermissionState.permanentlyDenied
             : StartupPermissionState.ready,
         hasPermissionIssue: outcome != StartupPermissionOutcome.granted,
       );
-      AppLogger.d("[System] Permissions Ready (Camera: $cam, Location: $loc)");
     } catch (e, stack) {
       AppLogger.e("Permission error", e, stack);
     }
@@ -307,7 +259,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   }
 
   Future<void> reloadBasePage() async {
-    AppLogger.d("[System] Reloading base page");
     if (_webViewController == null) return;
     await _webViewController?.loadUrl(
       urlRequest: URLRequest(url: WebUri.uri(Uri.parse(effectiveWebViewUrl))),
@@ -317,25 +268,20 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   Future<NavigationActionPolicy> handleNavigation(NavigationAction navigationAction) async {
     final uri = navigationAction.request.url;
     final rawUrl = uri?.toString() ?? '';
-    AppLogger.d("[Nav] handleNavigation: $rawUrl");
-
     if (rawUrl.isEmpty) return NavigationActionPolicy.ALLOW;
 
-    // 1. Tangani Deep Link (Skema non-HTTP seperti dana://, whatsapp://, dll)
+    // 1. Deep Link
     if (uri != null && !uri.scheme.startsWith('http')) {
-      AppLogger.d("[DeepLink] Launching external app for: ${uri.scheme}");
       launchUrl(uri, mode: LaunchMode.externalApplication);
       return NavigationActionPolicy.CANCEL;
     }
 
-    // Navigasi non-main-frame tetap diizinkan untuk resource internal non-payment.
-    if (!navigationAction.isForMainFrame) return NavigationActionPolicy.ALLOW;
-
+    // 2. Navigation Guard cerdas
     final handling = _navigationGuard.evaluate(rawUrl);
-    AppLogger.d("[Nav] Guard: ${handling.name} -> $rawUrl");
-
-    if (handling == NavigationHandling.block) {
-      AppLogger.d("[Guard] Blocked: $rawUrl");
+    
+    if (handling == NavigationHandling.openInCustomTab) {
+      AppLogger.d("[Nav] Diverting to Custom Tab (Unknown Host)");
+      _openInCustomTabs(rawUrl);
       return NavigationActionPolicy.CANCEL;
     }
 
@@ -343,21 +289,13 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   }
 
   Future<void> _openInCustomTabs(String rawUrl) async {
-    AppLogger.d("[Bridge] Opening Custom Tab for: $rawUrl");
-
     final uri = Uri.tryParse(rawUrl.trim());
-    if (uri == null) {
-      AppLogger.d("[Bridge] ❌ Invalid URL format");
-      return;
-    }
-
+    if (uri == null) return;
     try {
       if (!uri.scheme.startsWith('http')) {
-        AppLogger.d("[Bridge] Launching external app (non-http): $rawUrl");
         await launchUrl(uri, mode: LaunchMode.externalApplication);
         return;
       }
-
       await _browser.open(
         url: WebUri.uri(uri),
         settings: ChromeSafariBrowserSettings(
@@ -375,15 +313,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   void _processIncomingMessage(dynamic data) {
     final String url = data.toString().trim();
     if (url.isEmpty) return;
-    
-    AppLogger.d("[Bridge] Triggering Custom Tab via postMessage");
     _webViewController?.stopLoading();
     _openInCustomTabs(url);
-  }
-
-  void handleWebMessage(WebMessage? message) {
-    if (message != null && message.data != null) {
-      _processIncomingMessage(message.data);
-    }
   }
 }

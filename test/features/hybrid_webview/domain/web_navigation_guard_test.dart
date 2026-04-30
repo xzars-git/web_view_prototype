@@ -14,7 +14,7 @@ void main() {
     test('evaluate handles allowed URLs', () {
       // Skenario: Navigasi ke sub-halaman di dalam host aplikasi harus diperbolehkan.
       expect(
-        guard.evaluate('https://sambarav2.vercel.app/home'),
+        guard.evaluate('https://test-sambara-i16sl1wq1-xzars-projects.vercel.app/home'),
         NavigationHandling.allowWebView,
       );
     });
@@ -24,7 +24,7 @@ void main() {
       // Catatan: Ini memaksa komunikasi via bridge postMessage untuk Custom Tabs.
       expect(
         guard.evaluate('https://m.dana.id'),
-        NavigationHandling.block,
+        NavigationHandling.openInCustomTab,
       );
     });
   });

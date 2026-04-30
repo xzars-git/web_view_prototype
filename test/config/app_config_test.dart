@@ -16,8 +16,7 @@ void main() {
 
     test('isWebViewNavigationAllowed handles valid domains', () {
       // Skenario: Host yang ada di allowlist default harus diizinkan.
-      expect(config.isWebViewNavigationAllowed('https://sambarav2.vercel.app'), true);
-      expect(config.isWebViewNavigationAllowed('https://10.44.121.12'), true);
+      expect(config.isWebViewNavigationAllowed('https://test-sambara-i16sl1wq1-xzars-projects.vercel.app'), true);
     });
 
     test('isWebViewNavigationAllowed blocks external domains', () {

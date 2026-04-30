@@ -1,9 +1,12 @@
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
 import 'package:web_view_prototype/config/app_config.dart';
 import 'package:web_view_prototype/features/hybrid_webview/application/hybrid_webview_controller.dart';
 import 'package:web_view_prototype/features/hybrid_webview/application/web_permission_service.dart';
 import 'package:web_view_prototype/features/hybrid_webview/domain/web_navigation_guard.dart';
+
+class MockChromeSafariBrowser extends Mock implements ChromeSafariBrowser {}
 
 /// Mock Service untuk mensimulasikan interaksi perizinan native tanpa membutuhkan perangkat fisik.
 class MockWebPermissionService implements WebPermissionService {
@@ -53,15 +56,19 @@ void main() {
   late HybridWebViewController controller;
   late MockWebPermissionService mockPermissionService;
   late MockWebNavigationGuard mockNavigationGuard;
+  late MockChromeSafariBrowser mockBrowser;
   const config = DefaultAppConfig();
 
   setUp(() {
     mockPermissionService = MockWebPermissionService();
     mockNavigationGuard = MockWebNavigationGuard();
+    mockBrowser = MockChromeSafariBrowser();
+
     controller = HybridWebViewController(
       config: config,
       permissionService: mockPermissionService,
       navigationGuard: mockNavigationGuard,
+      browser: mockBrowser,
     );
   });
 
