@@ -7,6 +7,8 @@ import '../../../config/logger.dart';
 import '../application/hybrid_webview_controller.dart';
 import 'widgets/debug_tracker_overlay.dart';
 import 'widgets/permission_chip.dart';
+import 'widgets/simulation_toolbar.dart';
+
 
 /// Halaman utama fitur Hybrid WebView.
 ///
@@ -164,11 +166,7 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                               ),
                               onWebViewCreated: (controller) {
                                 _controller.webViewController = controller;
-                                // Inisialisasi bridge sisi JS.
-                                controller.addJavaScriptHandler(
-                                  handlerName: 'initBridge',
-                                  callback: (args) => {},
-                                );
+                                // Inisialisasi bridge sisi JS sudah dihandle di controller via UserScript
                               },
                               onLoadStart: (controller, url) {
                                 // Mencatat URL internal terakhir untuk keperluan navigasi 'Smart Back'.
@@ -181,11 +179,10 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                                 AppLogger.d("[UI] onPageCommitVisible: Content rendered");
                               },
                               shouldOverrideUrlLoading: (controller, navigationAction) async {
-                                final url = navigationAction.request.url?.toString() ?? 'unknown';
-                                AppLogger.d("[UI] shouldOverrideUrlLoading: $url");
                                 // Delegasi validasi navigasi ke controller (Navigation Guard).
                                 return _controller.handleNavigation(navigationAction);
                               },
+
                               onLoadStop: (controller, url) {
                                 AppLogger.d("[UI] onLoadStop: Load complete");
                               },
@@ -229,14 +226,17 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                           ],
                         ),
                 ),
-                // Panel Debug Tracker: Mendengarkan AppLogger secara global dan reaktif.
-                if (_showDebug)
+                // Panel Debug: Toolbar simulasi + log tracker.
+                if (_showDebug) ...[
+                  SimulationToolbar(controller: _controller),
                   ValueListenableBuilder<List<String>>(
                     valueListenable: AppLogger.logsNotifier,
                     builder: (context, logs, _) {
                       return DebugTrackerOverlay(logs: logs);
                     },
                   ),
+                ],
+
               ],
             ),
           ),

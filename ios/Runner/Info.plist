@@ -51,5 +51,14 @@
 	<string>Aplikasi membutuhkan akses kamera untuk fitur scan atau upload di halaman web.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Aplikasi membutuhkan akses mikrofon untuk fitur media di halaman web.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>pocapp</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

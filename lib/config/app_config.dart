@@ -14,9 +14,14 @@ abstract class AppConfig {
 
   String normalizeEnvironment(String rawValue);
   String urlForEnvironment(String environment);
-  
+
   /// Mengecek apakah sebuah URL diizinkan dibuka di dalam WebView utama.
   bool isWebViewNavigationAllowed(String rawUrl);
+
+  /// Mengecek apakah URL adalah halaman hasil pembayaran Finpay (CC/VA).
+  /// Digunakan di handleNavigation untuk trigger paymentCompleted saat
+  /// Finpay redirect ke halaman sukses/gagal setelah proses bayar.
+  bool isPaymentResultUrl(String rawUrl);
 }
 
 class DefaultAppConfig implements AppConfig {
@@ -37,12 +42,14 @@ class DefaultAppConfig implements AppConfig {
 
   static const String _prodBaseUrl = String.fromEnvironment(
     'PROD_BASE_URL',
-    defaultValue: 'https://test-sambara-i16sl1wq1-xzars-projects.vercel.app/beranda?data=pS9LkaUVso4Yv6eYOXzwR0-rwph4axBtM2vvcwBQ0Yu93rqVgUKh8zX_rQqqjh_gQTQiWqZeBbcyyNuj07T5tGBsLEkXf8mkRv3v5JfkTRzBKQJO4t_ZNQTjc7ZNWti1sTIMSuslp0sUuVzxs5fg6jZvXQYo1AFmySMk3OP_HYCZ35bIoDhnTwb_k5WaMiJvrIr_jhLhBcunr45uq94EJXMTeeah3LVcOQ7b1Z0SDTuusf9IfZwi6qxHqT_6m4crQ7s1ubJry7_bIPzPQ3XctmpupkQgUhxOqAAfuhVHwTY',
+    defaultValue:
+        'https://test-sambara.vercel.app/beranda?data=pS9LkaUVso4Yv6eYOXzwR0-rwph4axBtM2vvcwBQ0Yu93rqVgUKh8zX_rQqqjh_gQTQiWqZeBbcyyNuj07T5tGBsLEkXf8mkRv3v5JfkTRzBKQJO4t_ZNQTjc7ZNWti1sTIMSuslp0sUuVzxs5fg6jZvXQYo1AFmySMk3OP_HYCZ35bIoDhnTwb_k5WaMiJvrIr_jhLhBcunr45uq94EJXMTeeah3LVcOQ7b1Z0SDTuusf9IfZwi6qxHqT_6m4crQ7s1ubJry7_bIPzPQ3XctmpupkQgUhxOqAAfuhVHwTY',
   );
 
   static const String _allowedHostsEnv = String.fromEnvironment(
     'WEBVIEW_ALLOWED_HOSTS',
-    defaultValue: 'test-sambara-i16sl1wq1-xzars-projects.vercel.app',
+    // live.finpay.id: halaman CC/VA Finpay yang dibuka via window.location.href (Jalur A)
+    defaultValue: 'test-sambara.vercel.app,live.finpay.id',
   );
 
   List<String> get _webViewAllowedHosts =>
@@ -76,5 +83,25 @@ class DefaultAppConfig implements AppConfig {
       final normalizedAllowed = allowed.trim().toLowerCase();
       return host == normalizedAllowed || host.endsWith('.$normalizedAllowed');
     });
+  }
+
+  /// Mendeteksi halaman hasil pembayaran Finpay berdasarkan pola path.
+  /// Finpay redirect ke live.finpay.id/pg/payment/card/result/{status}
+  /// setelah proses bayar CC/VA selesai (sukses maupun gagal).
+  @override
+  bool isPaymentResultUrl(String rawUrl) {
+    final uri = Uri.tryParse(rawUrl);
+    if (uri == null) return false;
+    final path = uri.path.toLowerCase();
+    // Pola return URL Finpay yang terverifikasi dari actual redirect:
+    // - /pg/payment/card/result/success
+    // - /pg/payment/card/result/failed
+    // - /pg/payment/card/result/pending
+    return path.contains('/payment/card/result/') ||
+        path.contains('/payment/result/') ||
+        path.contains('/payment/return') ||
+        path.contains('/payment/callback') ||
+        path.contains('/payment/success') ||
+        path.contains('/payment/failed');
   }
 }

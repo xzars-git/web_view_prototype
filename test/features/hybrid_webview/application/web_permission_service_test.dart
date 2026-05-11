@@ -1,7 +1,6 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:permission_handler/permission_handler.dart' as ph;
 import 'package:web_view_prototype/features/hybrid_webview/application/web_permission_service.dart';
 
 void main() {

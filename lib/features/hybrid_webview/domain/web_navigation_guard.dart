@@ -6,8 +6,14 @@ enum NavigationHandling {
   /// Mengizinkan pemuatan di dalam WebView utama.
   allowWebView,
 
-  /// Mengalihkan navigasi ke Custom Tab (untuk host eksternal/pembayaran).
+  /// Membuka URL di Chrome Custom Tab (untuk E-Wallet).
   openInCustomTab,
+
+  /// Membuka URL di aplikasi eksternal (untuk deep link skema lain).
+  externalApp,
+
+  /// Membatalkan navigasi (untuk host eksternal/non-whitelist).
+  cancel,
 }
 
 /// Domain Logic untuk keamanan navigasi WebView.
@@ -23,17 +29,25 @@ class WebNavigationGuard {
     }
 
     final uri = Uri.tryParse(rawUrl);
-    if (uri == null) return NavigationHandling.openInCustomTab;
+    if (uri == null) return NavigationHandling.cancel;
 
-    // 1. Jika Host masuk dalam Whitelist (Domain utama/subdomain), izinkan di WebView.
-    if (_config.isWebViewNavigationAllowed(rawUrl)) {
-      AppLogger.d("GUARD: ✅ Whitelisted host, allowing in WebView");
+    // 1. Non-http scheme (pocapp://, dsb.) -> External App
+    if (!uri.scheme.startsWith('http')) {
+      return NavigationHandling.externalApp;
+    }
+
+    // 2. Deteksi Halaman Hasil Finpay (Jalur A) -> Allow di WebView
+    if (_config.isPaymentResultUrl(rawUrl)) {
       return NavigationHandling.allowWebView;
     }
 
-    // 2. Jika Host di luar domain utama, otomatis anggap butuh Custom Tab (Anti-Stuck).
-    // Ini menangani DANA, Shopee, atau link bank tanpa perlu hardcode namanya.
-    AppLogger.d("GUARD: 📱 External host detected, diverting to Custom Tab");
+    // 3. Whitelist check: PKB domain + live.finpay.id -> Allow di WebView
+    if (_config.isWebViewNavigationAllowed(rawUrl)) {
+      return NavigationHandling.allowWebView;
+    }
+
+    // 4. URL http/https di luar whitelist -> Buka di Custom Tab (Fallback)
+    AppLogger.d("GUARD: 🌐 External host detected, redirecting to Custom Tab: ${uri.host}");
     return NavigationHandling.openInCustomTab;
   }
 }
