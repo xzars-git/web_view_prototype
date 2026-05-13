@@ -455,6 +455,19 @@ adb shell am start -W -a android.intent.action.VIEW \
 | Demo timer delay | `5 detik` (ubah `_demoAutoCloseDelay`) |
 | Mock API | `api_service_pkb.dart → paymentVerification()` |
 
+### Apa yang PKB Sudah Jamin (Tidak Perlu Khawatir)
+
+| Item PKB | Status |
+|----------|--------|
+| Listen `paymentCompleted` via `registerPaymentListener()` di `initState` | ✅ |
+| Reentrancy guard di `doVerifyPayment()` — hanya 1 API call sekaligus | ✅ |
+| `handlePaymentCompletedFromHost()` → `stopTimer()` SEBELUM verify | ✅ |
+| `showFinpayRedirectScreen` di-reset saat verify sukses | ✅ |
+| `Timer?` nullable — aman dari crash `LateInitializationError` | ✅ |
+| `finally` block memastikan `isChecking` selalu di-reset | ✅ |
+| Listener dibersihkan di `dispose()` — tidak ada memory leak | ✅ |
+| `webview_finpay.dart` marked LEGACY — tidak konflik dengan host app | ✅ |
+
 ---
 
 ## 📋 PROMPT SIAP KIRIM — untuk Tim Host App

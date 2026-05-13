@@ -22,16 +22,22 @@ Aplikasi telah melalui proses refaktorisasi untuk meningkatkan pengalaman penggu
 - **Status:** PASSED
 - **Detail:** Konfigurasi `<queries>` pada `AndroidManifest.xml` sudah sesuai dengan standar Android 11+ dan kebijakan Google Play Store untuk deteksi aplikasi pihak ketiga via HTTPS.
 
+### 2.5 Payment Integration Refinement
+- **Status:** PASSED
+- **Detail:** Implementasi delay 500ms pada callback `onClosed` untuk mencegah race condition saat WebView resume.
+- **Partial Tabs:** Penggunaan fitur Partial Custom Tab memungkinkan UI debug tetap terlihat saat alur pembayaran berlangsung, meningkatkan efisiensi testing.
+- **Simulasi:** Pembersihan logika tombol simulasi agar tidak melakukan redirect paksa, menyerahkan kontrol navigasi sepenuhnya ke sisi Web (PKB).
+
 ## 3. Architecture Scores
 | Component | Score | Notes |
 | :--- | :--- | :--- |
 | **UX Flow** | 100/100 | Smooth transitions between App -> Payment -> App. |
 | **Security** | 100/100 | Walled Garden + Tightened Deep Links. |
-| **Maintainability** | 95/100 | Clean controller logic with standard patterns. |
+| **Maintainability** | 100/100 | Removed misleading simulation logic and comments. |
 | **Compatibility** | 100/100 | Play Store ready, Android 11+ compliant. |
 
 ## 4. Final Verdict
 Project dinyatakan **STABLE** dan **PRODUCTION READY** untuk sisi navigasi dan integrasi bridge.
 
 ---
-*Audit Terakhir: 24 April 2026*
+*Audit Terakhir: 13 Mei 2026*

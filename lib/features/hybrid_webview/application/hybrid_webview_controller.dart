@@ -100,6 +100,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   late AppLinks _appLinks;
   StreamSubscription<Uri>? _linkSubscription;
   late final ChromeSafariBrowser _browser;
+  Timer? _demoAutoCloseTimer;
 
   void _initBrowser([ChromeSafariBrowser? browser]) {
     _browser = browser ?? _PaymentChromeBrowser(
@@ -107,7 +108,9 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
         // Production: user tutup Custom Tab manual → beritahu PKB cek status.
         // PKB yang mengontrol navigasi setelah menerima event ini.
         AppLogger.d("[Browser] Closed manually by user");
-        _notifyPaymentCompleted();
+        Future.delayed(const Duration(milliseconds: 500), () {
+          _notifyPaymentCompleted();
+        });
       },
     );
   }
@@ -235,8 +238,21 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     });
   }
 
+  void _startDemoAutoClose() {
+    _demoAutoCloseTimer?.cancel();
+    _demoAutoCloseTimer = Timer(const Duration(seconds: 7), () async {
+      if (_browser.isOpened()) {
+        AppLogger.d('[Sim] Auto-triggering E-Wallet success after 7s');
+        _paymentNotified = false;
+        _notifyPaymentCompleted();
+        await _browser.close();
+      }
+    });
+  }
+
   @override
   void dispose() {
+    _demoAutoCloseTimer?.cancel();
     _linkSubscription?.cancel();
     super.dispose();
   }
@@ -245,9 +261,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   // Tombol simulasi mereproduksi urutan PERSIS yang terjadi di production:
   //   1. _notifyPaymentCompleted() → dispatch event ke PKB
   //   2. _browser.close() → tutup Custom Tab (jika terbuka)
-  // Ditambah langkah ekstra karena tidak ada pembayaran sungguhan:
-  //   3. reloadBasePage() → paksa kembali ke sambara
-  //      (Di production, PKB yang handle navigasi sendiri setelah verify API)
   // HAPUS blok ini di production build.
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -257,9 +270,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     AppLogger.d('[Sim] 💳 CC/VA — dispatch paymentCompleted');
     _paymentNotified = false;
     _notifyPaymentCompleted();  // ← sama persis dengan production
-    // ↓ Simulasi only: paksa kembali ke sambara (production: PKB handle sendiri)
-    await Future.delayed(const Duration(milliseconds: 500));
-    await reloadBasePage();
   }
 
   /// [SIM] Jalur B (manual close): User tutup Custom Tab e-wallet.
@@ -269,9 +279,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     _paymentNotified = false;
     _notifyPaymentCompleted();                        // ← production step 1
     if (_browser.isOpened()) await _browser.close();   // ← production step 2
-    // ↓ Simulasi only
-    await Future.delayed(const Duration(milliseconds: 500));
-    await reloadBasePage();
   }
 
   /// [SIM] Jalur B (deep link): Finpay kirim pocapp://payment/return.
@@ -281,9 +288,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     _paymentNotified = false;
     _notifyPaymentCompleted();                        // ← production step 1
     if (_browser.isOpened()) await _browser.close();   // ← production step 2
-    // ↓ Simulasi only
-    await Future.delayed(const Duration(milliseconds: 500));
-    await reloadBasePage();
   }
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -391,6 +395,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
         ),
       );
       AppLogger.d('[Nav] Custom Tab opened — waiting for deep link or manual close');
+      _startDemoAutoClose();
     } catch (e, stack) {
       AppLogger.e("Custom Tab error", e, stack);
       await launchUrl(uri, mode: LaunchMode.externalApplication);
