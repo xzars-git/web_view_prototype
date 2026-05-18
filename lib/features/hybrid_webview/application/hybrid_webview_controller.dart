@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../config/app_config.dart';
@@ -186,6 +188,8 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   void _setupJavaScriptHandlers() {
     AppLogger.d("[Bridge] Setting up JavaScript handlers...");
+
+    // SapawargaChannel: terima URL e-wallet → buka di Custom Tab
     _webViewController?.addJavaScriptHandler(
       handlerName: _config.bridgeName,
       callback: (args) {
@@ -193,34 +197,92 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
         _processIncomingMessage(args[0]);
       },
     );
+
+    // PaymentInfoChannel: terima kodeBayar dari PKB → trigger dummy payment
+    _webViewController?.addJavaScriptHandler(
+      handlerName: _config.paymentInfoBridgeName,
+      callback: (args) {
+        if (args.isEmpty) return;
+        final kodeBayar = args[0].toString().trim();
+        if (kodeBayar.isEmpty) {
+          AppLogger.d('[PaymentInfo] Received empty kodeBayar — skip');
+          return;
+        }
+        AppLogger.d('[PaymentInfo] kodeBayar received: $kodeBayar');
+        _forceDummyPayment(kodeBayar);
+      },
+    );
   }
 
-  UserScript get bridgeUserScript => UserScript(
-    groupName: _config.bridgeName.toLowerCase(),
+  /// Membuat UserScript untuk satu bridge channel.
+  UserScript _makeBridgeScript(String bridgeName) => UserScript(
+    groupName: '${bridgeName.toLowerCase()}_bridge',
     source: """
       (function() {
-        var bridgeName = '${_config.bridgeName}';
-        window[bridgeName] = {
+        var name = '$bridgeName';
+        window[name] = {
           postMessage: function(message) {
-            console.log('[Bridge] ' + bridgeName + '.postMessage called');
+            console.log('[Bridge] ' + name + '.postMessage called with: ' + message);
             if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-                window.flutter_inappwebview.callHandler(bridgeName, message);
-                return true; 
+              window.flutter_inappwebview.callHandler(name, message);
+              return true;
             } else {
-                window.addEventListener('flutterInAppWebViewPlatformReady', function(event) {
-                    window.flutter_inappwebview.callHandler(bridgeName, message);
-                });
-                return true;
+              window.addEventListener('flutterInAppWebViewPlatformReady', function() {
+                window.flutter_inappwebview.callHandler(name, message);
+              });
+              return true;
             }
           }
         };
-        console.log('[Bridge] ' + bridgeName + ' initialized');
+        console.log('[Bridge] ' + name + ' initialized');
       })();
     """,
     injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
   );
 
+  /// UserScript untuk SapawargaChannel (e-wallet → Custom Tab).
+  UserScript get bridgeUserScript => _makeBridgeScript(_config.bridgeName);
+
+  /// UserScript untuk PaymentInfoChannel (kodeBayar → Host App).
+  UserScript get paymentInfoBridgeScript => _makeBridgeScript(_config.paymentInfoBridgeName);
+
   void addDebugLog(String message) => AppLogger.d(message);
+
+  /// POST ke dummy payment server dengan kodeBayar yang diterima dari PKB.
+  /// Setelah berhasil (success == true), dispatch 'paymentCompleted' ke WebView.
+  /// Error ditangani secara silent — tidak crash jika server tidak reachable.
+  Future<void> _forceDummyPayment(String kodeBayar) async {
+    AppLogger.d('[Payment] _forceDummyPayment() called — kodeBayar: $kodeBayar');
+    try {
+      final url = Uri.parse('http://192.168.99.46:8700/api/force-dummy-payment');
+      AppLogger.d('[Payment] POST $url');
+
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'kodeBayar': kodeBayar}),
+      );
+
+      AppLogger.d('[Payment] Response status: ${response.statusCode}');
+      AppLogger.d('[Payment] Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> body = jsonDecode(response.body);
+        final bool success = body['success'] == true;
+        if (success) {
+          AppLogger.d('[Payment] Force dummy payment SUCCESS — notifying PKB');
+          _notifyPaymentCompleted();
+        } else {
+          AppLogger.d('[Payment] Force dummy payment returned success=false: ${body["message"]}');
+        }
+      } else {
+        AppLogger.d('[Payment] Unexpected HTTP status: ${response.statusCode}');
+      }
+    } catch (e, stack) {
+      // Silent fail — server dummy mungkin tidak aktif di prod environment
+      AppLogger.e('[Payment] _forceDummyPayment error (server unreachable?)', e, stack);
+    }
+  }
 
   void _initDeepLinks() {
     _appLinks = AppLinks();

@@ -146,6 +146,7 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                               // Menyuntikkan JavaScript Bridge (SapawargaChannel) sebelum dokumen dimuat.
                               initialUserScripts: UnmodifiableListView<UserScript>([
                                 _controller.bridgeUserScript,
+                                _controller.paymentInfoBridgeScript,
                               ]),
                               initialSettings: InAppWebViewSettings(
                                 javaScriptEnabled: true,
