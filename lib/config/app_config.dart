@@ -29,15 +29,24 @@ class DefaultAppConfig implements AppConfig {
   @override
   String get appBarTitle => 'Hybrid WebView';
 
+  /// URL base produksi untuk WebView utama.
+  ///
+  /// PENTING: Ganti defaultValue dengan URL produksi yang sebenarnya sebelum
+  /// melakukan build untuk production. URL di bawah ini hanya untuk testing.
+  ///
+  /// Alternatif: Gunakan build parameter --dart-define=PROD_BASE_URL=<url_actual>
+  /// untuk mengganti URL tanpa memodifikasi kode source.
+  ///
+  /// Contoh:
+  /// flutter build apk --dart-define=PROD_BASE_URL=https://sambara.vercel.app/beranda
   static const String _prodBaseUrl = String.fromEnvironment(
     'PROD_BASE_URL',
     defaultValue:
-        'https://test-sambara.vercel.app/beranda?data=pS9LkaUVso4Yv6eYOXzwR0-rwph4axBtM2vvcwBQ0Yu93rqVgUKh8zX_rQqqjh_gQTQiWqZeBbcyyNuj07T5tGBsLEkXf8mkRv3v5JfkTRzBKQJO4t_ZNQTjc7ZNWti1sTIMSuslp0sUuVzxs5fg6jZvXQYo1AFmySMk3OP_HYCZ35bIoDhnTwb_k5WaMiJvrIr_jhLhBcunr45uq94EJXMTeeah3LVcOQ7b1Z0SDTuusf9IfZwi6qxHqT_6m4crQ7s1ubJry7_bIPzPQ3XctmpupkQgUhxOqAAfuhVHwTY',
+        'https://test-sambara.vercel.app/beranda?data=fq2c1H5HSzl7bRDkuNxs-egYQwtgLJLS9l5VHRQZb7D1YmUSxaxow--P0WVfPH7Z0sDueotDmnuVr_Awc49DL7W_teRSVOxpbTy1HnWuFWuhv-uNYg09ccbNW0vYNaUkm2PQ6IpJxFFHGyYGtwDBQSY8H2LbRSNA1dnPRqw6_6cfPIsrfsjL4xfy0pL84Vhfsu3-mnS5OPNVrjwHhXQow_VVMjTTSx2hte-stLsn5cTG56oN7sXlt_pJf69fnGpsoE2k_BvdyprzdLN50a7Fun_2V7GuGjT_9bii7H02AT7XjkwpyJTdJCb82mtmA_7M',
   );
 
   static const String _allowedHostsEnv = String.fromEnvironment(
     'WEBVIEW_ALLOWED_HOSTS',
-    // live.finpay.id: halaman CC/VA Finpay yang dibuka via window.location.href (Jalur A)
     defaultValue: 'test-sambara.vercel.app,live.finpay.id',
   );
 

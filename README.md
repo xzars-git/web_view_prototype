@@ -6,6 +6,56 @@ Dokumen ini menyajikan spesifikasi teknis dan panduan integrasi antara Sambara W
 
 ---
 
+## Spesifikasi Tech Stack
+
+### Persyaratan Sistem Operasi
+
+| Platform | Versi Minimum | Catatan                        |
+| -------- | ------------- | ------------------------------ |
+| Android  | API 21+       | Target API: 35+                |
+| iOS      | 12.0+         | Minimum Deployment Target: 12+ |
+| Windows  | 10+           | Build Tools sesuai dokumentasi |
+| macOS    | 10.13+        | Untuk development iOS & macOS  |
+| Linux    | Ubuntu 20.04+ | Untuk development              |
+
+### Persyaratan Development
+
+| Komponen        | Versi Minimum | Catatan                        |
+| --------------- | ------------- | ------------------------------ |
+| **Flutter SDK** | 3.9.2+        | Gunakan `flutter --version`    |
+| **Dart SDK**    | 3.5.0+        | Disertakan dengan Flutter SDK  |
+| **Java / JDK**  | 11+           | Untuk build Android            |
+| **Android SDK** | API 35        | Target SDK untuk build optimal |
+| **Xcode**       | 14.0+         | Untuk build iOS (macOS only)   |
+| **CocoaPods**   | 1.11+         | Dependency manager iOS         |
+
+### Dependencies Utama
+
+| Package                | Versi   | Fungsi                                |
+| ---------------------- | ------- | ------------------------------------- |
+| `flutter`              | ^3.9.2  | Framework utama aplikasi              |
+| `flutter_inappwebview` | ^6.1.5  | WebView untuk menampilkan Sambara Web |
+| `geolocator`           | ^13.0.2 | Akses lokasi pengguna                 |
+| `permission_handler`   | ^11.3.1 | Manajemen perizinan sistem            |
+| `url_launcher`         | ^6.3.1  | Membuka URL eksternal                 |
+| `app_links`            | ^6.3.2  | Handling deep links & App Links       |
+
+### Dev Dependencies
+
+| Package         | Versi  | Fungsi            |
+| --------------- | ------ | ----------------- |
+| `flutter_test`  | SDK    | Testing framework |
+| `flutter_lints` | ^5.0.0 | Code quality      |
+| `mocktail`      | ^1.0.4 | Mocking untuk tes |
+
+### Tools Opsional
+
+- **Android Studio** atau **VS Code**: IDE untuk development
+- **GitHub Desktop** / **Git CLI**: Version control
+- **Postman** / **Insomnia**: Testing API (jika diperlukan)
+
+---
+
 ## Ruang Lingkup Integrasi
 
 Ruang lingkup integrasi ini mencakup:
