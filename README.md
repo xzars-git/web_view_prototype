@@ -1,46 +1,101 @@
 # web_view_prototype
 
-Hybrid WebView app: normal pages are loaded in WebView, while payment pages are opened in Custom Tabs based on config rules.
-Environment selection can be changed directly from in-app switcher (DEV/PROD).
+Host app Flutter yang mem-wrap **Sambara** (Flutter Web App) di dalam `InAppWebView`. Menangani alur pembayaran Finpay end-to-end: membuka halaman pembayaran e-wallet di overlay InAppWebView, melakukan polling status via API, dan mengirim notifikasi hasil ke Sambara.
 
-## Run
+## Arsitektur Singkat
 
-Default (dev URL):
+```
+Host App (Flutter Native)
+└── Stack
+    ├── InAppWebView — Sambara (selalu hidup, tidak di-destroy)
+    └── _PaymentWebViewOverlay — Finpay/e-wallet (muncul di atas saat diperlukan)
+```
+
+App selalu tetap di **foreground** → `Timer.periodic` polling berjalan tanpa throttling di Android maupun iOS.
+
+## Cara Menjalankan
 
 ```bash
+# Default (dev)
 flutter run
-```
 
-Explicit dev:
-
-```bash
-flutter run --dart-define=APP_ENV=dev
-```
-
-Production URL profile:
-
-```bash
-flutter run --dart-define=APP_ENV=prod
-```
-
-Override URL directly (highest priority):
-
-```bash
+# Override URL target
 flutter run --dart-define=TARGET_URL=https://example.com
+
+# Override URL payment server
+flutter run --dart-define=PAYMENT_BASE_URL=http://192.168.1.1:8700
 ```
 
-You can combine them, but `TARGET_URL` always wins.
-If `APP_ENV` is not `dev` or `prod`, app will fallback to `dev`.
+## Trigger Pembayaran
 
-## Environment Switcher
+Ada dua jalur masuk, keduanya berujung ke `_openPaymentWebView()`:
 
-- Use the switcher in app (`Use PROD`) to change between DEV and PROD.
-- `TARGET_URL` is still highest priority and will override switcher selection.
+### Primary — console.log (aktif digunakan)
 
-## Changelog & Improvements
+Sambara mengirim payload JSON via `console.log`:
 
-### [24 April 2026] - Smart Payment Bridge & UX Fixes
-- **Improved Navigation Stack:** Added `LaunchMode.externalNonBrowserApplication` to prioritize opening native payment apps (DANA, ShopeePay, etc.) directly. This ensures the system "Back" button returns to the Flutter app instead of Chrome.
-- **Zombie Tab Prevention:** Integrated `ChromeSafariBrowser` (InAppWebView) to replace standard `url_launcher` for Custom Tabs. The app now forcibly closes the browser tab upon receiving the `paymentCompleted` deep link.
-- **Package Visibility Compliance:** Verified `<queries>` in `AndroidManifest.xml` to ensure compatibility with Android 11+ and Google Play Store policies.
-- **Dynamic Fallback:** Implementation automatically falls back to Custom Tabs if a native application is not installed on the device.
+```javascript
+console.log(JSON.stringify({
+  type: "finpay_navigation",
+  url: "https://app.shopeepay.co.id/...",
+  kodeBayar: "3222002005265231"
+}));
+```
+
+Host menangkap via `onConsoleMessage` → `handleConsoleMessage()` → buka overlay + mulai polling.
+
+### Fallback — JS Bridge `SapawargaChannel.postMessage`
+
+```javascript
+window.SapawargaChannel.postMessage("https://...");
+```
+
+Digunakan sebagai fallback jika Sambara tidak mengirim format `finpay_navigation`. Karena payload-nya hanya URL (tanpa `kodeBayar`), **polling status tidak berjalan** via jalur ini.
+
+## Alur Pembayaran
+
+```
+Sambara: console.log({ type:"finpay_navigation", url, kodeBayar })
+  │
+  ▼
+Host: handleConsoleMessage() → validasi HTTPS → _openPaymentWebView()
+  │
+  ├─ state.paymentUrl = url → Stack tampilkan overlay di atas Sambara
+  ├─ dispatch paymentTabOpened → Sambara stop timer internal
+  └─ polling POST /api/check-dummy-payment-status setiap 10 detik
+       │
+       ├─ isPaid=true        → tutup overlay + dispatch paymentSuccess
+       ├─ User tutup overlay → tutup overlay + dispatch paymentHold
+       └─ 15 menit habis    → tutup overlay + dispatch paymentHold
+```
+
+## Events Host → Sambara
+
+| Event | Kapan | Payload |
+|-------|-------|---------|
+| `paymentTabOpened` | Overlay payment dibuka | `{ts, kodeBayar}` |
+| `paymentHold` | User menutup overlay / timeout | `{ts, kodeBayar}` |
+| `paymentSuccess` | API konfirmasi lunas / deep link | `{ts, kodeBayar}` |
+
+## Konfigurasi
+
+Semua konstanta ada di `lib/config/app_config.dart`:
+
+| Key (`--dart-define`) | Default | Keterangan |
+|-----------------------|---------|-----------|
+| `TARGET_URL` | Sambara dev URL | URL WebView utama |
+| `PAYMENT_BASE_URL` | `http://192.168.99.46:8700` | Server polling status |
+| `bridgeName` | `SapawargaChannel` | Nama JS bridge fallback |
+| `deepLinkScheme` | `pocapp` | Scheme deep link return |
+| `deepLinkHost` | `payment` | Host deep link return |
+
+## Deep Link (Android & iOS)
+
+Finpay akan redirect ke `pocapp://payment/return` atau `pocapp://payment/callback` setelah pembayaran selesai. Host menangkap via `app_links`, menutup overlay, dan men-dispatch `paymentSuccess` ke Sambara.
+
+- **Android:** `AndroidManifest.xml` — intent-filter scheme `pocapp`, host `payment`
+- **iOS:** `Info.plist` — `CFBundleURLSchemes = ["pocapp"]`
+
+## Debug Panel
+
+Ketuk ikon bug di AppBar untuk toggle panel log. Semua log dari `[WebView]`, `[Console]`, `[Polling]`, `[DeepLink]`, dan `[Event]` muncul di satu tempat — bisa digunakan di device fisik tanpa perlu USB.

@@ -56,19 +56,16 @@ void main() {
   late HybridWebViewController controller;
   late MockWebPermissionService mockPermissionService;
   late MockWebNavigationGuard mockNavigationGuard;
-  late MockChromeSafariBrowser mockBrowser;
   const config = DefaultAppConfig();
 
   setUp(() {
     mockPermissionService = MockWebPermissionService();
     mockNavigationGuard = MockWebNavigationGuard();
-    mockBrowser = MockChromeSafariBrowser();
 
     controller = HybridWebViewController(
       config: config,
       permissionService: mockPermissionService,
       navigationGuard: mockNavigationGuard,
-      browser: mockBrowser,
     );
   });
 

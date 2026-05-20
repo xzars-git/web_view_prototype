@@ -1,47 +1,18 @@
 # Snippet Code — Host App Payment Integration
 
-> **Versi:** 2026-05-20 (v3 — Tanpa dialog, tanpa paymentCompleted, polling 5s/15min)
-> **File sumber:** `hybrid_webview_controller.dart`
-> **Package:** `flutter_inappwebview`, `http`, `url_launcher`, `app_links`
+> **Versi:** 2026-05-20 (v4 — InAppWebView overlay, Dio polling, tanpa Custom Tab)
+> **File sumber:** `hybrid_webview_controller.dart`, `hybrid_webview_page.dart`
 
 ---
 
-## 1. Menerima Data dari Console Log
-
-PKB mengirim data pembayaran e-wallet via `console.log`. Host app menangkap melalui `onConsoleMessage`.
-
-### Format JSON dari PKB:
-
-```json
-{
-    "type": "finpay_navigation",
-    "url": "https://m.dana.id/n/cashier/new/checkout?bizNo=...",
-    "kodeBayar": "3222002005265231"
-}
-```
-
-### Snippet — Presentation Layer:
+## 1. Parse Console Message dari Sambara
 
 ```dart
-onConsoleMessage: (controller, consoleMessage) {
-  _controller.handleConsoleMessage(consoleMessage.message);
-},
-```
-
-### Snippet — Controller:
-
-```dart
-String? _activeKodeBayar;
-int _pollingErrorCount = 0;
-
 void handleConsoleMessage(String message) {
   final preview = message.length > 120 ? '${message.substring(0, 120)}...' : message;
   AppLogger.d("[JS] $preview");
 
   if (!message.contains('finpay_navigation')) return;
-
-  AppLogger.d("[Console] ════════════════════════════════");
-  AppLogger.d("[Console] 📨 Mendeteksi finpay_navigation");
 
   try {
     final Map<String, dynamic> json = jsonDecode(message);
@@ -50,252 +21,166 @@ void handleConsoleMessage(String message) {
     final String? url = json['url']?.toString().trim();
     final String? kodeBayar = json['kodeBayar']?.toString().trim();
 
-    AppLogger.d("[Console] ✅ type: finpay_navigation");
-    AppLogger.d("[Console] 🔑 kodeBayar: ${kodeBayar ?? 'NULL'}");
-    AppLogger.d("[Console] 🔗 url host: ${url != null ? Uri.tryParse(url)?.host : 'null'}");
-
     if (url == null || url.isEmpty) return;
     final uri = Uri.tryParse(url);
     if (uri == null || uri.scheme != 'https') return;
 
     _activeKodeBayar = kodeBayar;
-    _pollingErrorCount = 0;
-
-    AppLogger.d("[Console] → Membuka Custom Tab + polling (max 15 menit)");
-    AppLogger.d("[Console] ════════════════════════════════");
-
     _webViewController?.stopLoading();
-    _openInCustomTabs(url);
+    _openPaymentWebView(url);
   } catch (e) {
-    AppLogger.d("[Console] ❌ JSON parse error: $e");
+    AppLogger.d("[Console] JSON parse error: $e");
   }
 }
 ```
 
 ---
 
-## 2. Custom Tab Close → paymentHold (Tanpa Dialog)
-
-Saat user tutup Custom Tab, host app **langsung kirim `paymentHold`** ke PKB.
-Dialog konfirmasi pembatalan ditampilkan oleh **Sambara (WebView)**, BUKAN host app.
-
-### Snippet — Browser onClosed:
+## 2. Buka / Tutup Payment Overlay
 
 ```dart
-class _PaymentChromeBrowser extends ChromeSafariBrowser {
-  _PaymentChromeBrowser({required this.onClosedCallback});
-  final VoidCallback onClosedCallback;
-  @override
-  void onClosed() => onClosedCallback();
+void _openPaymentWebView(String url) {
+  value = value.copyWith(paymentUrl: url);  // Stack tampilkan overlay
+  _notifyPaymentTabOpened();
+  _startPaymentStatusPolling();
 }
 
-void _initBrowser([ChromeSafariBrowser? browser]) {
-  _browser = browser ?? _PaymentChromeBrowser(
-    onClosedCallback: () {
-      AppLogger.d("[Browser] ════════════════════════════════");
-      AppLogger.d("[Browser] 🔴 Custom Tab DITUTUP oleh user");
-      AppLogger.d("[Browser] kodeBayar: ${_activeKodeBayar ?? 'null'}");
-      AppLogger.d("[Browser] → Stop polling + kirim paymentHold ke PKB");
-      AppLogger.d("[Browser] ════════════════════════════════");
-      _stopPaymentStatusPolling();
-      _notifyPaymentHold();
-      _activeKodeBayar = null;
-    },
-  );
+void onPaymentWebViewClosedByUser() {
+  _stopPaymentStatusPolling();
+  value = value.copyWith(paymentUrl: null); // Stack sembunyikan overlay
+  _notifyPaymentHold();
+  _activeKodeBayar = null;
 }
-```
 
-### Snippet — Dispatch paymentHold:
-
-```dart
-void _notifyPaymentHold() {
-  AppLogger.d("[Payment] ════════════════════════════════");
-  AppLogger.d("[Payment] 🔴 DISPATCH event 'paymentHold' ke PKB");
-  AppLogger.d("[Payment] kodeBayar: ${_activeKodeBayar ?? 'null'}");
-  AppLogger.d("[Payment] Sambara akan menampilkan dialog konfirmasi");
-  AppLogger.d("[Payment] ════════════════════════════════");
-  _webViewController?.evaluateJavascript(
-    source: "window.dispatchEvent(new CustomEvent('paymentHold', "
-            "{detail:{ts:Date.now(), kodeBayar:'${_activeKodeBayar ?? ''}'}}));",
-  );
+void _closePaymentWebView() {
+  value = value.copyWith(paymentUrl: null);
 }
-```
-
-### PKB (Web) — Listener paymentHold:
-
-```javascript
-window.addEventListener('paymentHold', function(event) {
-    console.log('Payment hold — kodeBayar:', event.detail.kodeBayar);
-    // Sambara menampilkan dialog konfirmasi pembatalan sendiri
-});
 ```
 
 ---
 
-## 3. Polling API Cek Status Pembayaran
+## 3. Payment Overlay Widget
 
-Setelah Custom Tab terbuka:
-- Polling setiap **5 detik**
-- Batas waktu **15 menit**
-- Jika paid → **tutup Custom Tab saja** (TIDAK kirim event ke PKB)
-
-### Endpoint:
-
-```
-POST http://192.168.99.46:8700/api/check-dummy-payment-status
-Content-Type: application/json
-
-{ "kodeBayar": "3222002005265231" }
+```dart
+// Di Stack (hybrid_webview_page.dart):
+if (state.paymentUrl != null)
+  _PaymentWebViewOverlay(
+    url: state.paymentUrl!,
+    onClose: _controller.onPaymentWebViewClosedByUser,
+  ),
 ```
 
-### Response dari API (contoh sukses):
+Overlay menggunakan UA tanpa `" wv"` agar tidak dideteksi sebagai WebView:
 
-```json
-{
-    "success": true,
-    "code": "0000",
-    "message": "Tagihan dengan kode bayar 3222002005265231 sudah berhasil dibayar",
-    "param": {
-        "kodeBayar": "3222002005265231"
-    }
+```dart
+// Cache UA — hanya dibuat sekali per sesi app
+String? _cachedUserAgent;
+
+Future<String> _getCleanUserAgent() async {
+  if (_cachedUserAgent != null) return _cachedUserAgent!;
+  final webView = HeadlessInAppWebView(initialUrlRequest: URLRequest(url: WebUri('about:blank')));
+  await webView.run();
+  final ua = await webView.webViewController?.evaluateJavascript(source: 'navigator.userAgent') as String? ?? '';
+  await webView.dispose();
+  _cachedUserAgent = ua.replaceAll(' wv', '');
+  return _cachedUserAgent!;
 }
 ```
 
-### Logika isPaid:
+Deep link native app di dalam overlay:
 
 ```dart
-final bool isPaid = body['success'] == true && body['code'] == '0000';
+shouldOverrideUrlLoading: (controller, navigationAction) async {
+  final uri = navigationAction.request.url;
+  if (uri == null) return NavigationActionPolicy.CANCEL;
+  if (uri.scheme != 'http' && uri.scheme != 'https') {
+    // Shopee, DANA, dll. — catchError untuk handle app tidak terinstall
+    await launchUrl(uri, mode: LaunchMode.externalApplication).catchError((_) => false);
+    return NavigationActionPolicy.CANCEL;
+  }
+  return NavigationActionPolicy.ALLOW;
+},
 ```
 
-### Snippet — Polling + Check Status:
+---
+
+## 4. Polling Status Pembayaran (Dio)
 
 ```dart
-Timer? _paymentStatusPoller;
-Timer? _pollingMaxTimer;
-bool _isPollingPayment = false;
-int _pollingErrorCount = 0;
-static const int _maxPollingErrorLog = 3;
-static const Duration _pollingInterval = Duration(seconds: 5);
+static const Duration _pollingInterval = Duration(seconds: 10);
 static const Duration _pollingMaxDuration = Duration(minutes: 15);
 
 void _startPaymentStatusPolling() {
   if (_activeKodeBayar == null || _activeKodeBayar!.isEmpty) return;
-
   _stopPaymentStatusPolling();
-  _pollingErrorCount = 0;
+  _dio.options.baseUrl = _config.paymentBaseUrl;
 
-  AppLogger.d("[Polling] ▶️ Polling DIMULAI");
-  AppLogger.d("[Polling] kodeBayar  : $_activeKodeBayar");
-  AppLogger.d("[Polling] interval   : ${_pollingInterval.inSeconds} detik");
-  AppLogger.d("[Polling] max durasi : ${_pollingMaxDuration.inMinutes} menit");
-
-  _paymentStatusPoller = Timer.periodic(_pollingInterval, (_) {
-    _checkPaymentStatus();
+  _pollingTimer = Timer.periodic(_pollingInterval, (_) async {
+    if (_activeKodeBayar == null) { _stopPaymentStatusPolling(); return; }
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/check-dummy-payment-status',
+        data: {'kodeBayar': _activeKodeBayar},
+      );
+      if (response.statusCode == 200 && response.data != null) {
+        final body = response.data!;
+        final bool isPaid = body['success'] == true && body['code'] == '0000';
+        if (isPaid) {
+          _stopPaymentStatusPolling();
+          _closePaymentWebView();
+          _notifyPaymentSuccess();
+          _activeKodeBayar = null;
+        }
+      }
+    } catch (e) {
+      AppLogger.d("[Polling] Error: $e");
+    }
   });
 
   // Auto-stop setelah 15 menit
   _pollingMaxTimer = Timer(_pollingMaxDuration, () {
-    AppLogger.d("[Polling] ⏰ Batas ${_pollingMaxDuration.inMinutes} menit tercapai — stop");
     _stopPaymentStatusPolling();
+    _closePaymentWebView();
+    _notifyPaymentHold();
+    _activeKodeBayar = null;
   });
 }
+```
 
-void _stopPaymentStatusPolling() {
-  if (_paymentStatusPoller != null) {
-    AppLogger.d("[Polling] ⏹️ Polling DIHENTIKAN");
-  }
-  _paymentStatusPoller?.cancel();
-  _paymentStatusPoller = null;
-  _pollingMaxTimer?.cancel();
-  _pollingMaxTimer = null;
-  _isPollingPayment = false;
+---
+
+## 5. Dispatch Events ke Sambara
+
+```dart
+void _dispatchPaymentEvent(String eventName) {
+  _webViewController?.evaluateJavascript(
+    source: "window.dispatchEvent(new CustomEvent('$eventName', {detail:{ts:Date.now(), kodeBayar:'${_activeKodeBayar ?? ''}'}}));",
+  );
 }
 
-Future<void> _checkPaymentStatus() async {
-  if (_isPollingPayment) return;
-  if (_activeKodeBayar == null) { _stopPaymentStatusPolling(); return; }
+void _notifyPaymentHold() => _dispatchPaymentEvent('paymentHold');
+void _notifyPaymentTabOpened() => _dispatchPaymentEvent('paymentTabOpened');
+void _notifyPaymentSuccess() => _dispatchPaymentEvent('paymentSuccess');
+```
 
-  _isPollingPayment = true;
-  try {
-    final endpoint = Uri.parse('http://192.168.99.46:8700/api/check-dummy-payment-status');
-    final requestBody = jsonEncode({'kodeBayar': _activeKodeBayar});
+---
 
-    AppLogger.d("[Polling] 🔄 POST $endpoint");
-    AppLogger.d("[Polling] Request body: $requestBody");
+## 6. Deep Link Return dari Finpay
 
-    final response = await http
-        .post(endpoint, headers: {'Content-Type': 'application/json'}, body: requestBody)
-        .timeout(const Duration(seconds: 5),
-          onTimeout: () => throw TimeoutException('Timeout 5s — cek WiFi'));
-
-    AppLogger.d("[Polling] Response status : ${response.statusCode}");
-    AppLogger.d("[Polling] Response body   : ${response.body}");
-
-    if (response.statusCode == 200) {
-      final Map<String, dynamic> body = jsonDecode(response.body);
-
-      // Debug: tampilkan semua field response
-      AppLogger.d("[Polling] ── Parsed Response ──");
-      AppLogger.d("[Polling]   success : ${body['success']}");
-      AppLogger.d("[Polling]   code    : ${body['code']}");
-      AppLogger.d("[Polling]   message : ${body['message']}");
-      AppLogger.d("[Polling]   param   : ${body['param']}");
-
-      final bool isPaid = body['success'] == true && body['code'] == '0000';
-      AppLogger.d("[Polling]   isPaid  : $isPaid");
-      AppLogger.d("[Polling] ────────────────────");
-
-      _pollingErrorCount = 0;
-
-      if (isPaid) {
-        AppLogger.d("[Polling] ════════════════════════════════");
-        AppLogger.d("[Polling] 💰 LUNAS — kodeBayar: $_activeKodeBayar");
-        AppLogger.d("[Polling] → Menutup Custom Tab (TIDAK kirim event)");
-        AppLogger.d("[Polling] ════════════════════════════════");
+```dart
+void _initDeepLinks() {
+  _appLinks = AppLinks();
+  _linkSubscription = _appLinks.uriLinkStream.listen((uri) async {
+    if (uri.scheme == _config.deepLinkScheme && uri.host == _config.deepLinkHost) {
+      if (uri.path.contains('return') || uri.path.contains('callback')) {
         _stopPaymentStatusPolling();
-        if (_browser.isOpened()) await _browser.close();
+        _closePaymentWebView();
+        _notifyPaymentSuccess();
         _activeKodeBayar = null;
-        return;
       }
     }
-  } catch (e) {
-    _pollingErrorCount++;
-    if (_pollingErrorCount <= _maxPollingErrorLog) {
-      AppLogger.d("[Polling] Error ke-$_pollingErrorCount/$_maxPollingErrorLog: $e");
-      if (_pollingErrorCount == _maxPollingErrorLog) {
-        AppLogger.d("[Polling] 🔕 Log disuppress — polling tetap berjalan");
-      }
-    }
-  } finally {
-    _isPollingPayment = false;
-  }
+  });
 }
-```
-
-### Contoh Output Debug:
-
-```
-[Polling] ▶️ Polling DIMULAI
-[Polling] kodeBayar  : 3222002005265231
-[Polling] interval   : 5 detik
-[Polling] max durasi : 15 menit
-[Polling] 🔄 POST http://192.168.99.46:8700/api/check-dummy-payment-status
-[Polling] Request body: {"kodeBayar":"3222002005265231"}
-[Polling] Response status : 200
-[Polling] Response body   : {"success":true,"code":"0000","message":"Tagihan dengan kode bayar 3222002005265231 sudah berhasil dibayar","param":{"kodeBayar":"3222002005265231"}}
-[Polling] ── Parsed Response ──
-[Polling]   success : true
-[Polling]   code    : 0000
-[Polling]   message : Tagihan dengan kode bayar 3222002005265231 sudah berhasil dibayar
-[Polling]   param   : {kodeBayar: 3222002005265231}
-[Polling]   isPaid  : true
-[Polling] ────────────────────
-[Polling] ════════════════════════════════
-[Polling] 💰 LUNAS — kodeBayar: 3222002005265231
-[Polling] → Menutup Custom Tab (TIDAK kirim event)
-[Polling] ════════════════════════════════
-[Polling] ⏹️ Polling DIHENTIKAN
-[Polling] 🔒 Menutup Custom Tab...
 ```
 
 ---
@@ -303,33 +188,27 @@ Future<void> _checkPaymentStatus() async {
 ## Ringkasan Alur
 
 ```
-PKB console.log({ type:"finpay_navigation", url, kodeBayar })
+Sambara: console.log({ type:"finpay_navigation", url, kodeBayar })
   │
   ▼
-Host: onConsoleMessage → handleConsoleMessage()
+Host: handleConsoleMessage() → validasi HTTPS → _openPaymentWebView(url)
   │
-  ├─ Parse JSON → simpan kodeBayar
-  │
-  ▼
-Host: _openInCustomTabs(url) → Custom Tab terbuka
-Host: _startPaymentStatusPolling() → polling setiap 5 detik (max 15 menit)
-  │
-  ├─── isPaid (code=0000) ──► TUTUP Custom Tab saja (tanpa event)
-  │
-  ├─── User tutup tab ─────► kirim paymentHold ke PKB
-  │                           → Sambara tampilkan dialog konfirmasi
-  │
-  ├─── Deep link pocapp:// ─► TUTUP Custom Tab saja (tanpa event)
-  │
-  └─── 15 menit habis ─────► Stop polling otomatis
+  ├─ state.paymentUrl = url → Stack tampilkan overlay
+  ├─ dispatch paymentTabOpened → Sambara stop timer
+  └─ polling setiap 10 detik (max 15 menit)
+       │
+       ├── isPaid (code=0000) → tutup overlay + paymentSuccess
+       ├── User tekan X/back  → tutup overlay + paymentHold
+       ├── Deep link pocapp:// → tutup overlay + paymentSuccess
+       └── 15 menit habis     → tutup overlay + paymentHold
 ```
 
 ---
 
-## Event Yang Dikirim ke PKB
+## Events ke Sambara
 
 | Event | Payload | Kapan |
 |-------|---------|-------|
-| `paymentHold` | `{detail: {ts, kodeBayar}}` | User tutup Custom Tab |
-
-> **PENTING:** Host app TIDAK mengirim `paymentCompleted`. Saat pembayaran sukses, host app hanya menutup Custom Tab. Sambara mendeteksi sendiri status pembayaran via API internal.
+| `paymentTabOpened` | `{ts, kodeBayar}` | Overlay buka |
+| `paymentHold` | `{ts, kodeBayar}` | User tutup / timeout |
+| `paymentSuccess` | `{ts, kodeBayar}` | Lunas (API / deep link) |

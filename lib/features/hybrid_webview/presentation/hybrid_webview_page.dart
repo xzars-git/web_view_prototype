@@ -1,6 +1,7 @@
 import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../config/app_config.dart';
 import '../../../config/logger.dart';
@@ -8,29 +9,14 @@ import '../application/hybrid_webview_controller.dart';
 import 'widgets/debug_tracker_overlay.dart';
 import 'widgets/permission_chip.dart';
 
-
-/// Halaman utama fitur Hybrid WebView.
-///
-/// Widget ini merupakan entry point untuk menampilkan konten web di dalam aplikasi native.
-/// Mengintegrasikan [InAppWebView] dengan [HybridWebViewController] untuk menangani:
-/// 1. Navigasi aman (Navigation Guard)
-/// 2. Komunikasi Bridge (JavaScript Handlers)
-/// 3. Perizinan Hardware (Kamera & Lokasi)
-/// 4. Indikator Progress dan Debug Tracker
 class HybridWebViewPage extends StatefulWidget {
-  /// Membuat instance [HybridWebViewPage].
-  ///
-  /// Memerlukan [config] untuk pengaturan domain/bridge dan [initialEnvironment].
   const HybridWebViewPage({
-    super.key, 
-    required this.config, 
+    super.key,
+    required this.config,
     required this.initialEnvironment,
   });
 
-  /// Injeksi konfigurasi aplikasi.
   final AppConfig config;
-
-  /// Environment awal yang akan digunakan.
   final String initialEnvironment;
 
   @override
@@ -38,20 +24,13 @@ class HybridWebViewPage extends StatefulWidget {
 }
 
 class _HybridWebViewPageState extends State<HybridWebViewPage> {
-  /// Controller utama untuk mengelola logika WebView.
   late final HybridWebViewController _controller;
-
-  /// Status apakah panel Debug Tracker ditampilkan di layar.
   bool _showDebug = true;
 
   @override
   void initState() {
     super.initState();
-    // Inisialisasi controller dengan konfigurasi yang disuntikkan.
     _controller = HybridWebViewController(config: widget.config);
-
-    // Menjalankan permintaan izin startup (Kamera & Lokasi) setelah frame pertama dirender.
-    // Hal ini menjamin konteks UI siap sebelum dialog sistem muncul.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _controller.requestStartupPermissions();
     });
@@ -59,25 +38,24 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
 
   @override
   void dispose() {
-    // Memastikan controller dibersihkan untuk mencegah kebocoran memori.
     _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-
-    // Mendengarkan perubahan state dari controller secara reaktif menggunakan ValueListenableBuilder.
     return ValueListenableBuilder<HybridWebViewState>(
       valueListenable: _controller,
       builder: (context, state, _) {
         return PopScope(
-          // canPop: false mematikan navigasi back default sistem.
-          // Kita menghandle navigasi back secara manual via smartGoBack.
           canPop: false,
           onPopInvokedWithResult: (didPop, result) async {
             if (didPop) return;
-            // Pemicu navigasi back cerdas (melompati halaman redirect jika perlu).
+            // Kalau payment WebView sedang terbuka, tutup dulu (= user cancel)
+            if (state.paymentUrl != null) {
+              _controller.onPaymentWebViewClosedByUser();
+              return;
+            }
             await _controller.smartGoBack();
           },
           child: Scaffold(
@@ -86,33 +64,31 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
               leading: IconButton(
                 icon: const Icon(Icons.arrow_back),
                 onPressed: () async {
+                  if (state.paymentUrl != null) {
+                    _controller.onPaymentWebViewClosedByUser();
+                    return;
+                  }
                   final controller = _controller.webViewController;
-                  // Jika WebView bisa kembali, gunakan smartGoBack.
                   if (controller != null && await controller.canGoBack()) {
                     await _controller.smartGoBack();
                   } else {
-                    // Jika tidak bisa kembali di history web, tutup halaman native.
                     if (context.mounted) Navigator.of(context).pop();
                   }
                 },
               ),
               actions: [
-                // Tombol toggle untuk menampilkan/menyembunyikan Debug Tracker Overlay.
                 IconButton(
                   onPressed: () => setState(() => _showDebug = !_showDebug),
                   icon: Icon(_showDebug ? Icons.bug_report : Icons.bug_report_outlined),
-                  tooltip: 'Toggle Debug Tracker',
                 ),
-                // Tombol reload untuk memuat ulang halaman utama dari awal.
                 IconButton(
-                  onPressed: _controller.reloadBasePage, 
+                  onPressed: _controller.reloadBasePage,
                   icon: const Icon(Icons.refresh),
                 ),
               ],
             ),
             body: Column(
               children: [
-                // Header bar: Menampilkan indikator izin Kamera/Lokasi dan status operasional.
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   child: Row(
@@ -133,17 +109,18 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                 ),
                 const Divider(height: 1),
                 Expanded(
-                  flex: 3,
-                  child: _controller.isRequestingPermissions
-                      ? const Center(child: CircularProgressIndicator())
-                      : Stack(
+                  child: Stack(
+                    children: [
+                      // ── Sambara WebView (utama) ──────────────────────────
+                      if (_controller.isRequestingPermissions)
+                        const Center(child: CircularProgressIndicator())
+                      else
+                        Stack(
                           children: [
-                            // Widget WebView Utama.
                             InAppWebView(
                               initialUrlRequest: URLRequest(
                                 url: WebUri(_controller.effectiveWebViewUrl),
                               ),
-                              // Menyuntikkan JavaScript Bridge (SapawargaChannel) sebelum dokumen dimuat.
                               initialUserScripts: UnmodifiableListView<UserScript>([
                                 _controller.bridgeUserScript,
                               ]),
@@ -157,7 +134,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                                 mediaPlaybackRequiresUserGesture: false,
                                 supportMultipleWindows: false,
                                 javaScriptCanOpenWindowsAutomatically: false,
-                                // Optimalisasi rendering untuk halaman eksternal yang berat.
                                 useWideViewPort: true,
                                 loadWithOverviewMode: true,
                                 supportZoom: true,
@@ -166,82 +142,181 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                               ),
                               onWebViewCreated: (controller) {
                                 _controller.webViewController = controller;
-                                // Inisialisasi bridge sisi JS sudah dihandle di controller via UserScript
                               },
                               onLoadStart: (controller, url) {
-                                // Mencatat URL internal terakhir untuk keperluan navigasi 'Smart Back'.
-                                if (url != null) {
-                                  _controller.updateLastSafeUrl(url.toString());
-                                }
-                                AppLogger.d("[UI] onLoadStart: $url");
+                                if (url != null) _controller.updateLastSafeUrl(url.toString());
+                                AppLogger.d('[WebView] Load started: $url');
                               },
                               onPageCommitVisible: (controller, url) {
-                                AppLogger.d("[UI] onPageCommitVisible: Content rendered");
+                                AppLogger.d('[WebView] Page commit visible');
                               },
                               shouldOverrideUrlLoading: (controller, navigationAction) async {
-                                // Delegasi validasi navigasi ke controller (Navigation Guard).
                                 return _controller.handleNavigation(navigationAction);
                               },
-
                               onLoadStop: (controller, url) {
-                                AppLogger.d("[UI] onLoadStop: Load complete");
+                                AppLogger.d('[WebView] Load finished');
                               },
                               onReceivedError: (controller, request, error) {
-                                AppLogger.d("[UI] ❌ Error: ${error.description}");
-                                _controller.updateStatus("Error: ${error.description}");
+                                AppLogger.d('[WebView] Error: ${error.description}');
+                                _controller.updateStatus('Error: ${error.description}');
                               },
                               onReceivedHttpError: (controller, request, errorResponse) {
-                                AppLogger.d("[UI] 🔴 HTTP Error ${errorResponse.statusCode}");
-                                _controller.updateStatus("HTTP Error ${errorResponse.statusCode}");
+                                AppLogger.d('[WebView] HTTP ${errorResponse.statusCode}: ${request.url}');
+                                _controller.updateStatus('HTTP ${errorResponse.statusCode}');
                               },
                               onConsoleMessage: (controller, consoleMessage) {
-                                // PRIMARY HANDLER: intercept console.log dari PKB WebView.
-                                // Deteksi finpay_navigation JSON untuk membuka Custom Tab.
                                 _controller.handleConsoleMessage(consoleMessage.message);
                               },
                               onRenderProcessGone: (controller, detail) {
-                                AppLogger.d("[UI] ⚠️ WebView Crash Detected!");
-                                _controller.updateStatus("WebView Crashed");
+                                AppLogger.d('[WebView] Render process terminated');
+                                _controller.updateStatus('WebView crashed');
                               },
                               onPermissionRequest: (controller, request) async {
-                                // Menangani permintaan izin hardware dari Web (Kamera, Mic, dll).
-                                AppLogger.d("[UI] Web permission req: ${request.resources}");
                                 return _controller.handleWebPermissionRequest(request);
                               },
                               onGeolocationPermissionsShowPrompt: (controller, origin) async {
-                                // Menangani permintaan izin lokasi dari Web.
-                                AppLogger.d("[UI] Geolocation req from: $origin");
                                 return _controller.handleGeolocationPrompt(origin);
                               },
                               onProgressChanged: (controller, progress) {
-                                // Memperbarui indikator loading linear.
                                 _controller.updateProgress(progress / 100.0);
                               },
                             ),
-                            // Indikator progres pemuatan (Top Bar).
                             if (state.progress < 1)
                               const Align(
                                 alignment: Alignment.topCenter,
                                 child: LinearProgressIndicator(minHeight: 2),
                               ),
-                        ],
-                      ),
+                          ],
+                        ),
+
+                      // ── Payment WebView Overlay (Finpay) ─────────────────
+                      if (state.paymentUrl != null)
+                        _PaymentWebViewOverlay(
+                          url: state.paymentUrl!,
+                          onClose: _controller.onPaymentWebViewClosedByUser,
+                        ),
+                    ],
+                  ),
                 ),
-                // Panel Debug: log tracker (simulation toolbar dihapus).
-                if (_showDebug) ...[
+                if (_showDebug)
                   ValueListenableBuilder<List<String>>(
                     valueListenable: AppLogger.logsNotifier,
-                    builder: (context, logs, _) {
-                      return DebugTrackerOverlay(logs: logs);
-                    },
+                    builder: (context, logs, _) => DebugTrackerOverlay(logs: logs),
                   ),
-                ],
-
               ],
             ),
           ),
         );
       },
+    );
+  }
+}
+
+/// WebView overlay full-screen untuk halaman pembayaran Finpay.
+/// App tetap foreground → Timer.periodic bisa polling tanpa throttling di kedua platform.
+
+// Cached UA — stripped " wv" agar tidak terdeteksi sebagai WebView oleh Shopee Pay, dll.
+String? _cachedUserAgent;
+
+Future<String> _getCleanUserAgent() async {
+  if (_cachedUserAgent != null) return _cachedUserAgent!;
+  final webView = HeadlessInAppWebView(initialUrlRequest: URLRequest(url: WebUri('about:blank')));
+  await webView.run();
+  final ua = await webView.webViewController?.evaluateJavascript(source: 'navigator.userAgent') as String? ?? '';
+  await webView.dispose();
+  _cachedUserAgent = ua.replaceAll(' wv', '');
+  return _cachedUserAgent!;
+}
+
+class _PaymentWebViewOverlay extends StatefulWidget {
+  const _PaymentWebViewOverlay({required this.url, required this.onClose});
+
+  final String url;
+  final VoidCallback onClose;
+
+  @override
+  State<_PaymentWebViewOverlay> createState() => _PaymentWebViewOverlayState();
+}
+
+class _PaymentWebViewOverlayState extends State<_PaymentWebViewOverlay> {
+  String? _userAgent;
+
+  @override
+  void initState() {
+    super.initState();
+    _getCleanUserAgent().then((ua) {
+      if (mounted) setState(() => _userAgent = ua);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_userAgent == null) {
+      return const ColoredBox(color: Colors.white, child: Center(child: CircularProgressIndicator()));
+    }
+    return ColoredBox(
+      color: Colors.white,
+      child: Column(
+        children: [
+          // Header dengan tombol close
+          SafeArea(
+            bottom: false,
+            child: Container(
+              color: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: widget.onClose,
+                    tooltip: 'Tutup pembayaran',
+                  ),
+                  const Expanded(
+                    child: Text(
+                      'Pembayaran',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const Divider(height: 1),
+          // WebView Finpay
+          Expanded(
+            child: InAppWebView(
+              initialUrlRequest: URLRequest(url: WebUri(widget.url)),
+              initialSettings: InAppWebViewSettings(
+                javaScriptEnabled: true,
+                useShouldOverrideUrlLoading: true,
+                mediaPlaybackRequiresUserGesture: false,
+                allowsInlineMediaPlayback: true,
+                domStorageEnabled: true,
+                databaseEnabled: true,
+                userAgent: _userAgent,
+              ),
+              shouldOverrideUrlLoading: (controller, navigationAction) async {
+                final uri = navigationAction.request.url;
+                if (uri == null) return NavigationActionPolicy.CANCEL;
+                // Non-HTTP schemes (shopee://, dana://, etc.) are native app deep
+                // links generated by the payment page — hand them to the OS.
+                // catchError handles the case where the target app is not installed.
+                if (uri.scheme != 'http' && uri.scheme != 'https') {
+                  final launched = await launchUrl(
+                    uri,
+                    mode: LaunchMode.externalApplication,
+                  ).catchError((_) => false);
+                  if (!launched) {
+                    AppLogger.d('[PaymentOverlay] Deep link failed — app not installed: ${uri.scheme}');
+                  }
+                  return NavigationActionPolicy.CANCEL;
+                }
+                return NavigationActionPolicy.ALLOW;
+              },
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

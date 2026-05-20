@@ -11,6 +11,7 @@ abstract class AppConfig {
   String get deepLinkHost;
   String get paymentEventName;
   String get appBarTitle;
+  String get paymentBaseUrl;
   bool get isTargetUrlOverridden;
 
   String normalizeEnvironment(String rawValue);
@@ -41,6 +42,12 @@ class DefaultAppConfig implements AppConfig {
   String get paymentEventName => 'paymentCompleted';
   @override
   String get appBarTitle => 'Hybrid WebView';
+
+  @override
+  String get paymentBaseUrl => const String.fromEnvironment(
+    'PAYMENT_BASE_URL',
+    defaultValue: 'http://192.168.99.46:8700',
+  );
 
   static const String _prodBaseUrl = String.fromEnvironment(
     'PROD_BASE_URL',

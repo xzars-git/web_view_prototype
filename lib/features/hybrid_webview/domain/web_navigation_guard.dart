@@ -1,53 +1,53 @@
 import '../../../config/app_config.dart';
 import '../../../config/logger.dart';
 
-/// Jenis penanganan untuk navigasi URL di WebView.
+/// Describes how the controller should handle a navigation request.
 enum NavigationHandling {
-  /// Mengizinkan pemuatan di dalam WebView utama.
+  /// Load the URL inside the main Sambara WebView.
   allowWebView,
 
-  /// Membuka URL di Chrome Custom Tab (untuk E-Wallet).
+  /// Open the URL in the in-app payment overlay (e-wallet pages).
   openInCustomTab,
 
-  /// Membuka URL di aplikasi eksternal (untuk deep link skema lain).
+  /// Hand off to the OS to open in an external application (deep links).
   externalApp,
 
-  /// Membatalkan navigasi (untuk host eksternal/non-whitelist).
+  /// Block the navigation entirely.
   cancel,
 }
 
-/// Domain Logic untuk keamanan navigasi WebView.
+/// Evaluates navigation URLs against config-driven rules and returns the
+/// appropriate [NavigationHandling] decision.
+///
+/// Rule priority (first match wins):
+/// 1. Non-HTTP scheme → [externalApp]
+/// 2. Finpay result page → [allowWebView] (CC/VA payment return)
+/// 3. Whitelisted host → [allowWebView]
+/// 4. Everything else → [openInCustomTab] (payment overlay fallback)
 class WebNavigationGuard {
   final AppConfig _config;
 
   const WebNavigationGuard({required AppConfig config}) : _config = config;
 
-  /// Mengevaluasi URL untuk menentukan tindakan navigasi.
   NavigationHandling evaluate(String rawUrl) {
-    if (rawUrl.isEmpty) {
-      return NavigationHandling.allowWebView;
-    }
+    if (rawUrl.isEmpty) return NavigationHandling.allowWebView;
 
     final uri = Uri.tryParse(rawUrl);
     if (uri == null) return NavigationHandling.cancel;
 
-    // 1. Non-http scheme (pocapp://, dsb.) -> External App
     if (!uri.scheme.startsWith('http')) {
       return NavigationHandling.externalApp;
     }
 
-    // 2. Deteksi Halaman Hasil Finpay (Jalur A) -> Allow di WebView
     if (_config.isPaymentResultUrl(rawUrl)) {
       return NavigationHandling.allowWebView;
     }
 
-    // 3. Whitelist check: PKB domain + live.finpay.id -> Allow di WebView
     if (_config.isWebViewNavigationAllowed(rawUrl)) {
       return NavigationHandling.allowWebView;
     }
 
-    // 4. URL http/https di luar whitelist -> Buka di Custom Tab (Fallback)
-    AppLogger.d("GUARD: 🌐 External host detected, redirecting to Custom Tab: ${uri.host}");
+    AppLogger.d('[Guard] External host — routing to payment overlay: ${uri.host}');
     return NavigationHandling.openInCustomTab;
   }
 }

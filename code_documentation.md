@@ -1,145 +1,137 @@
-# Dokumentasi Teknis - Web View Prototype (Hybrid)
+# Dokumentasi Teknis — web_view_prototype
 
-Proyek ini adalah prototipe aplikasi Flutter yang mengintegrasikan WebView secara mendalam dengan fitur native Android/iOS. Fokus utamanya adalah menangani flow pembayaran yang kompleks, perizinan hardware, dan komunikasi bridge yang aman.
-
-> **Versi:** 2026-05-20 (Refactored — Console-based handler + API polling)
+> **Versi:** 2026-05-20 (InAppWebView overlay — tanpa Custom Tab, tanpa Foreground Service)
 
 ---
 
-## 🏗 Arsitektur Proyek
+## Struktur Proyek
 
-Aplikasi mengikuti pola **Feature-First Architecture** sederhana:
-
-- `lib/config/`: Konfigurasi global, logging, dan env variables.
-- `lib/features/hybrid_webview/`: Fitur inti yang terdiri dari:
-  - `application/`: Controller (logika bisnis & koordinasi).
-  - `domain/`: Logika validasi dan guard navigasi.
-  - `presentation/`: UI Widget dan WebView.
-
----
-
-## 🚀 Flow Utama & Fitur Unggulan
-
-### 1. Console Message Handler (Primary — finpay_navigation)
-
-Aplikasi mendeteksi instruksi pembayaran dari PKB melalui **`console.log`** (bukan `postMessage`).
-
-- **Trigger:** PKB Web App memanggil `console.log(JSON.stringify({...}))`.
-- **Format JSON:**
-  ```json
-  {
-      "type": "finpay_navigation",
-      "url": "https://m.dana.id/n/cashier/new/checkout?...",
-      "kodeBayar": "3222002005265231"
-  }
-  ```
-- **Action:** Host app mendeteksi JSON ini via `onConsoleMessage`, lalu:
-  1. Buka URL di **Custom Tab** (Chrome Custom Tabs / SFSafariViewController).
-  2. Mulai **polling API** `check-dummy-payment-status` setiap 3 detik.
-  3. Jika status `true` → tutup Custom Tab otomatis + dispatch `paymentCompleted`.
-
-### 2. JavaScript Bridge (SapawargaChannel — Fallback)
-
-Bridge `SapawargaChannel` tetap tersedia sebagai **fallback** jika PKB belum update ke console.log.
-
-- **Trigger:** Web memanggil `window.SapawargaChannel.postMessage(url)`.
-- **Action:** App mendeteksi URL dan membuka di Custom Tab.
-- **Keterbatasan:** Hanya menerima URL, tanpa `kodeBayar`. Polling status tidak tersedia via jalur ini.
-
-### 3. Smart Navigation Guard (Anti-Stuck)
-
-Menyelesaikan masalah klasik di mana user terjebak di halaman redirect pembayaran (VA/CC).
-
-- **Teknik:** *Double-Buffer Host Tracking*.
-- **Cara Kerja:** App selalu mencatat domain internal terakhir. Jika user masuk ke domain bank (External Host) dan menekan tombol Back, App akan mendeteksi perbedaan host dan langsung memuat ulang halaman internal terakhir, melompati halaman redirector yang menjebak.
-
-### 4. Unified Startup Permissions
-
-App meminta izin Kamera dan Lokasi di awal (startup).
-
-- **Proses:** WebView tidak akan dimuat sampai status perizinan jelas (Granted/Denied).
-- **Fallback:** Jika izin diberikan, WebView secara otomatis memberikan akses ke hardware saat diminta oleh JavaScript tanpa dialog tambahan yang mengganggu.
-
-### 5. Centralized Debug Tracker
-
-Panel log visual yang bisa muncul di layar HP.
-
-- **Teknis:** Menggunakan `ValueNotifier` statis di `AppLogger`.
-- **Kelebihan:** Log dari konsol JavaScript, Deep Link, dan sistem Native muncul di satu tempat yang sama. Tetap berfungsi di mode Release untuk mempermudah debugging lapangan.
-
-### 6. Payment Hold & Cancellation Dialog
-
-Saat user menutup Custom Tab pembayaran secara manual:
-
-- **Action:** Muncul dialog **Konfirmasi Pembatalan Transaksi** dengan info kode bayar.
-- **Opsi 1:** "Lanjutkan Bayar" → Reopen Custom Tab dengan URL yang sama.
-- **Opsi 2:** "Batalkan Transaksi" → Dispatch event `paymentHold` ke PKB.
-- **Tanggung Jawab PKB:** Mendengarkan event `paymentHold` dan menghit API pembatalan dari sisi web.
-
----
-
-## 🛠 Hal-Hal Penting untuk Developer (Clone)
-
-### Cara Menjalankan
-
-Pastikan menggunakan `--dart-define` jika ingin mengubah URL tujuan:
-
-```bash
-flutter run --dart-define=PROD_BASE_URL=https://alamat-web-kamu.com
+```
+lib/
+├── config/
+│   ├── app_config.dart       — konstanta URL, bridge name, deep link scheme
+│   └── logger.dart           — AppLogger dengan ValueNotifier untuk debug panel
+├── features/hybrid_webview/
+│   ├── application/
+│   │   ├── hybrid_webview_controller.dart  — orkestrasi utama
+│   │   └── web_permission_service.dart     — wrapper permission_handler
+│   ├── domain/
+│   │   └── web_navigation_guard.dart       — evaluasi URL → NavigationHandling
+│   └── presentation/
+│       ├── hybrid_webview_page.dart         — UI: Stack Sambara + payment overlay
+│       └── widgets/
+│           ├── debug_tracker_overlay.dart
+│           └── permission_chip.dart
 ```
 
-### Konfigurasi Bridge
+---
 
-Semua detail teknis dikelola di `lib/config/app_config.dart`. Kamu bisa mengubah:
+## Komponen Utama
 
-- `bridgeName`: Nama objek window di JavaScript (fallback).
-- `deepLinkScheme`: Skema untuk kembali dari pembayaran (`pocapp://`).
-- `paymentEventName`: Nama event yang dikirim balik ke Web (`paymentCompleted`).
+### HybridWebViewState
 
-### Keamanan
+State immutable yang di-hold oleh `ValueNotifier`. Field `paymentUrl` menggunakan sentinel pattern agar `null` bisa di-set secara eksplisit via `copyWith`.
 
-Daftar domain yang diizinkan untuk dibuka di dalam WebView utama diatur via `WEBVIEW_ALLOWED_HOSTS` di `app_config.dart`. Domain di luar ini akan otomatis diblokir atau dialihkan.
+```
+paymentUrl == null  → overlay tersembunyi, hanya Sambara yang tampil
+paymentUrl != null  → overlay payment tampil di atas Sambara
+```
+
+### HybridWebViewController
+
+Controller utama sekaligus `ValueNotifier<HybridWebViewState>`. Bertanggung jawab atas:
+
+- **JS Bridge** — inject `SapawargaChannel` via `UserScript AT_DOCUMENT_START` (fallback jika Sambara pakai `postMessage`)
+- **Console handler** — parse `finpay_navigation` JSON dari Sambara
+- **Payment overlay** — buka/tutup via `paymentUrl` di state
+- **Polling** — `Timer.periodic` (10 detik) + `Timer` max 15 menit, keduanya via Dio
+- **Deep link** — `app_links` stream, cocok scheme `pocapp` + host `payment`
+- **Navigation guard** — delegasi ke `WebNavigationGuard`
+
+### _PaymentWebViewOverlay
+
+`StatefulWidget` yang ditampilkan di atas Sambara WebView saat `paymentUrl != null`.
+
+- Fetch user agent sekali via `HeadlessInAppWebView`, di-cache di variabel modul-level `_cachedUserAgent`
+- UA di-strip dari `" wv"` agar tidak terdeteksi sebagai WebView oleh Shopee Pay, DANA, dll.
+- Non-HTTP scheme (shopee://, dana://, dll.) dibuka via `launchUrl` dengan `.catchError` untuk handle app tidak terinstall
 
 ---
 
-## 📝 Catatan Integrasi Tim Web (PKB)
+## Alur Pembayaran
 
-Untuk berkomunikasi dengan Host App, gunakan kode berikut di sisi Web:
+### Trigger dari Sambara
+
+Sambara mengirim data pembayaran via `console.log`:
+
+```json
+{ "type": "finpay_navigation", "url": "https://...", "kodeBayar": "3222..." }
+```
+
+Host intercept via `onConsoleMessage` → `handleConsoleMessage()` → validasi HTTPS → `_openPaymentWebView()`.
+
+### Pembayaran Berjalan
+
+1. `value.paymentUrl` di-set → Flutter rebuild → overlay muncul
+2. `paymentTabOpened` di-dispatch ke Sambara (Sambara stop timer internal)
+3. Polling mulai: `POST /api/check-dummy-payment-status` setiap 10 detik
+
+### Selesai / Dibatalkan
+
+| Kondisi | Action |
+|---------|--------|
+| API return `success=true && code="0000"` | Stop polling, tutup overlay, dispatch `paymentSuccess` |
+| User tekan tombol X / back | Stop polling, tutup overlay, dispatch `paymentHold` |
+| Deep link `pocapp://payment/return` | Stop polling, tutup overlay, dispatch `paymentSuccess` |
+| 15 menit habis | Stop polling, tutup overlay, dispatch `paymentHold` |
+
+---
+
+## JS Events (Host → Sambara)
+
+Semua event dikirim via `evaluateJavascript`:
+
+```dart
+window.dispatchEvent(new CustomEvent('paymentTabOpened', {detail:{ts:Date.now(), kodeBayar:'...'}}))
+window.dispatchEvent(new CustomEvent('paymentHold',      {detail:{ts:Date.now(), kodeBayar:'...'}}))
+window.dispatchEvent(new CustomEvent('paymentSuccess',   {detail:{ts:Date.now(), kodeBayar:'...'}}))
+```
+
+Sambara listen:
 
 ```javascript
-// Mengirim URL pembayaran e-wallet + kodeBayar ke Host App (PRIMARY)
-console.log(JSON.stringify({
-    type: "finpay_navigation",
-    url: "https://link-pembayaran-ewallet.com",
-    kodeBayar: "3222002005265231"
-}));
-
-// Mendengarkan status pembayaran selesai (setelah Custom Tab ditutup & status API true)
-window.addEventListener('paymentCompleted', function(event) {
-    console.log("Pembayaran selesai, silakan refresh status!");
-    console.log("Timestamp:", event.detail?.ts);
-});
-
-// Mendengarkan pembatalan transaksi (user tutup Custom Tab + konfirmasi batal)
-window.addEventListener('paymentHold', function(event) {
-    console.log("User membatalkan — kodeBayar:", event.detail?.kodeBayar);
-    // Hit API pembatalan dari sisi PKB
-});
+window.addEventListener('paymentTabOpened', (e) => { /* stop internal timer */ });
+window.addEventListener('paymentHold',      (e) => { /* resume timer, show dialog */ });
+window.addEventListener('paymentSuccess',   (e) => { /* mark sukses */ });
 ```
 
 ---
 
-## 📊 Referensi Cepat
+## Navigation Guard
 
-| Item | Nilai |
-|------|-------|
-| Console message type | `finpay_navigation` |
-| Bridge name (fallback) | `SapawargaChannel` |
-| Event: pembayaran selesai | `paymentCompleted` |
-| Event: pembayaran hold | `paymentHold` |
-| Deep link scheme | `pocapp` |
-| Deep link host | `payment` |
-| Finpay domain (whitelist) | `live.finpay.id` |
-| Result URL pattern | `/pg/payment/card/result/` |
-| Payment status API | `POST /api/check-dummy-payment-status` |
-| Polling interval | `3 detik` |
+`WebNavigationGuard.evaluate(url)` mengembalikan `NavigationHandling`:
+
+| Hasil | Action di controller |
+|-------|---------------------|
+| `allowWebView` | `ALLOW` — buka di Sambara WebView |
+| `openInCustomTab` | `CANCEL` + buka payment overlay |
+| `externalApp` | `CANCEL` + `launchUrl` external |
+| `cancel` | `CANCEL` |
+
+---
+
+## Permissions
+
+Diminta saat startup via `requestStartupPermissions()`. WebView tidak load sampai status izin jelas. Saat JS minta akses kamera/lokasi, host langsung grant tanpa dialog tambahan karena sudah dicek di startup.
+
+---
+
+## Packages
+
+| Package | Kegunaan |
+|---------|---------|
+| `flutter_inappwebview` | WebView utama + HeadlessWebView untuk UA |
+| `dio` | HTTP polling status pembayaran |
+| `app_links` | Listen deep link return dari Finpay |
+| `url_launcher` | Buka deep link native app (shopee://, dll.) |
+| `permission_handler` | Request izin kamera & lokasi |

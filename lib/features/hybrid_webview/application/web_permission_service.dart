@@ -37,10 +37,10 @@ class WebPermissionService {
   })  : _locationPermission = locationPermission ?? ph.Permission.locationWhenInUse,
         _cameraPermission = cameraPermission ?? ph.Permission.camera;
 
-  /// Meminta izin kamera dan lokasi dari sistem operasi secara sekuensial.
+  /// Requests camera and location permissions sequentially so system dialogs
+  /// appear one at a time instead of stacking on top of each other.
   Future<StartupPermissionOutcome> requestStartupPermissions() async {
     try {
-      // Meminta izin satu per satu agar dialog sistem muncul secara berurutan.
       final locationStatus = await _locationPermission.request();
       final cameraStatus = await _cameraPermission.request();
 
@@ -72,10 +72,8 @@ class WebPermissionService {
     return status.isGranted;
   }
 
-  /// Menangani callback izin dari WebView. 
-  /// 
-  /// Menggunakan pola POC: Langsung memberikan izin (GRANT) karena validasi 
-  /// sudah dilakukan di level sistem saat startup.
+  /// Grants any WebView permission request unconditionally. System-level
+  /// validation already happened at startup, so no second prompt is needed.
   Future<WebPermissionDecision> handleWebPermissionRequest(PermissionRequest request) async {
     return WebPermissionDecision(
       granted: true,
@@ -87,9 +85,7 @@ class WebPermissionService {
     );
   }
 
-  /// Menangani callback geolokasi dari WebView.
-  /// 
-  /// Langsung memberikan izin (ALLOW) karena validasi sistem sudah dilakukan.
+  /// Grants geolocation to any origin. Same rationale as [handleWebPermissionRequest].
   Future<GeolocationDecision> handleGeolocationPrompt(String origin) async {
     return GeolocationDecision(
       locationServiceEnabled: true,
@@ -101,13 +97,8 @@ class WebPermissionService {
     );
   }
 
-  /// Helper untuk mengecek apakah status izin termasuk kategori 'Granted'.
-  bool _isGranted(ph.PermissionStatus status) {
-    return status.isGranted || status.isLimited;
-  }
+  bool _isGranted(ph.PermissionStatus status) => status.isGranted || status.isLimited;
 
-  /// Helper untuk mengecek apakah status izin termasuk kategori 'Permanently Denied'.
-  bool _isPermanentOrRestricted(ph.PermissionStatus status) {
-    return status.isPermanentlyDenied || status.isRestricted;
-  }
+  bool _isPermanentOrRestricted(ph.PermissionStatus status) =>
+      status.isPermanentlyDenied || status.isRestricted;
 }
