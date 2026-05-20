@@ -34,7 +34,7 @@ class DefaultAppConfig implements AppConfig {
   /// PENTING: Ganti defaultValue dengan URL produksi yang sebenarnya sebelum
   /// melakukan build untuk production. URL di bawah ini hanya untuk testing.
   ///
-  /// Alternatif: Gunakan build parameter --dart-define=PROD_BASE_URL=<url_actual>
+  /// Alternatif: Gunakan build parameter --dart-define=PROD_BASE_URL=url_actual
   /// untuk mengganti URL tanpa memodifikasi kode source.
   ///
   /// Contoh:
