@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"D:\\\\Kerja\\\\web_view_prototype\" -Recurse -Filter \"*.dart\")",
+      "Bash(Select-Object FullName)",
+      "Bash(ConvertTo-Json -AsArray)",
+      "Bash(Out-String)",
+      "Bash(dart analyze *)",
+      "PowerShell(Set-Content *)"
+    ]
+  }
+}

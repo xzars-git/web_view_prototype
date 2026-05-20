@@ -1,4 +1,3 @@
-import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
@@ -8,29 +7,27 @@ import '../application/hybrid_webview_controller.dart';
 import 'widgets/debug_tracker_overlay.dart';
 import 'widgets/permission_chip.dart';
 
-
-/// Halaman utama fitur Hybrid WebView.
+/// Halaman utama fitur Hybrid WebView (Sambara).
 ///
-/// Widget ini merupakan entry point untuk menampilkan konten web di dalam aplikasi native.
-/// Mengintegrasikan [InAppWebView] dengan [HybridWebViewController] untuk menangani:
-/// 1. Navigasi aman (Navigation Guard)
-/// 2. Komunikasi Bridge (JavaScript Handlers)
-/// 3. Perizinan Hardware (Kamera & Lokasi)
-/// 4. Indikator Progress dan Debug Tracker
+/// Entry point untuk menampilkan konten web Sambara di dalam aplikasi native.
+/// Mengintegrasikan [InAppWebView] dengan [HybridWebViewController] untuk:
+/// - Navigasi aman via [WebNavigationGuard]
+/// - Komunikasi bridge JavaScript ([SapawargaChannel])
+/// - Perizinan hardware (kamera & lokasi)
+/// - Stack payment page (push [PaymentWebViewPage] di atas Sambara)
+/// - Debug tracker overlay untuk monitoring
 class HybridWebViewPage extends StatefulWidget {
-  /// Membuat instance [HybridWebViewPage].
-  ///
-  /// Memerlukan [config] untuk pengaturan domain/bridge dan [initialEnvironment].
+  /// Memerlukan [config] dan [initialEnvironment] untuk inisialisasi.
   const HybridWebViewPage({
-    super.key, 
-    required this.config, 
+    super.key,
+    required this.config,
     required this.initialEnvironment,
   });
 
-  /// Injeksi konfigurasi aplikasi.
+  /// Konfigurasi aplikasi (domain, bridge name, whitelist, dll).
   final AppConfig config;
 
-  /// Environment awal yang akan digunakan.
+  /// Environment yang akan digunakan (e.g. 'prod').
   final String initialEnvironment;
 
   @override
@@ -38,20 +35,19 @@ class HybridWebViewPage extends StatefulWidget {
 }
 
 class _HybridWebViewPageState extends State<HybridWebViewPage> {
-  /// Controller utama untuk mengelola logika WebView.
+  /// Controller utama untuk logika WebView dan payment.
   late final HybridWebViewController _controller;
 
-  /// Status apakah panel Debug Tracker ditampilkan di layar.
+  /// Toggle visibility panel Debug Tracker.
   bool _showDebug = true;
 
   @override
   void initState() {
     super.initState();
-    // Inisialisasi controller dengan konfigurasi yang disuntikkan.
     _controller = HybridWebViewController(config: widget.config);
 
-    // Menjalankan permintaan izin startup (Kamera & Lokasi) setelah frame pertama dirender.
-    // Hal ini menjamin konteks UI siap sebelum dialog sistem muncul.
+    // Request izin hardware setelah frame pertama dirender
+    // agar dialog sistem tidak muncul sebelum UI siap.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _controller.requestStartupPermissions();
     });
@@ -59,25 +55,23 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
 
   @override
   void dispose() {
-    // Memastikan controller dibersihkan untuk mencegah kebocoran memori.
     _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Update navigator context setiap build untuk operasi Navigator di controller
+    _controller.navigatorContext = context;
 
-    // Mendengarkan perubahan state dari controller secara reaktif menggunakan ValueListenableBuilder.
     return ValueListenableBuilder<HybridWebViewState>(
       valueListenable: _controller,
       builder: (context, state, _) {
         return PopScope(
-          // canPop: false mematikan navigasi back default sistem.
-          // Kita menghandle navigasi back secara manual via smartGoBack.
+          // Disable default back — handle manual via smartGoBack
           canPop: false,
           onPopInvokedWithResult: (didPop, result) async {
             if (didPop) return;
-            // Pemicu navigasi back cerdas (melompati halaman redirect jika perlu).
             await _controller.smartGoBack();
           },
           child: Scaffold(
@@ -87,32 +81,30 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                 icon: const Icon(Icons.arrow_back),
                 onPressed: () async {
                   final controller = _controller.webViewController;
-                  // Jika WebView bisa kembali, gunakan smartGoBack.
                   if (controller != null && await controller.canGoBack()) {
                     await _controller.smartGoBack();
                   } else {
-                    // Jika tidak bisa kembali di history web, tutup halaman native.
                     if (context.mounted) Navigator.of(context).pop();
                   }
                 },
               ),
               actions: [
-                // Tombol toggle untuk menampilkan/menyembunyikan Debug Tracker Overlay.
+                // Toggle Debug Tracker
                 IconButton(
                   onPressed: () => setState(() => _showDebug = !_showDebug),
                   icon: Icon(_showDebug ? Icons.bug_report : Icons.bug_report_outlined),
                   tooltip: 'Toggle Debug Tracker',
                 ),
-                // Tombol reload untuk memuat ulang halaman utama dari awal.
+                // Reload ke beranda
                 IconButton(
-                  onPressed: _controller.reloadBasePage, 
+                  onPressed: _controller.reloadBasePage,
                   icon: const Icon(Icons.refresh),
                 ),
               ],
             ),
             body: Column(
               children: [
-                // Header bar: Menampilkan indikator izin Kamera/Lokasi dan status operasional.
+                // Header: status perizinan kamera & lokasi
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   child: Row(
@@ -132,21 +124,18 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                   ),
                 ),
                 const Divider(height: 1),
+
+                // WebView utama (Sambara)
                 Expanded(
                   flex: 3,
                   child: _controller.isRequestingPermissions
                       ? const Center(child: CircularProgressIndicator())
                       : Stack(
                           children: [
-                            // Widget WebView Utama.
                             InAppWebView(
                               initialUrlRequest: URLRequest(
                                 url: WebUri(_controller.effectiveWebViewUrl),
                               ),
-                              // Menyuntikkan JavaScript Bridge (SapawargaChannel) sebelum dokumen dimuat.
-                              initialUserScripts: UnmodifiableListView<UserScript>([
-                                _controller.bridgeUserScript,
-                              ]),
                               initialSettings: InAppWebViewSettings(
                                 javaScriptEnabled: true,
                                 useShouldOverrideUrlLoading: true,
@@ -157,7 +146,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                                 mediaPlaybackRequiresUserGesture: false,
                                 supportMultipleWindows: false,
                                 javaScriptCanOpenWindowsAutomatically: false,
-                                // Optimalisasi rendering untuk halaman eksternal yang berat.
                                 useWideViewPort: true,
                                 loadWithOverviewMode: true,
                                 supportZoom: true,
@@ -166,68 +154,46 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                               ),
                               onWebViewCreated: (controller) {
                                 _controller.webViewController = controller;
-                                // Inisialisasi bridge sisi JS sudah dihandle di controller via UserScript
-                              },
-                              onLoadStart: (controller, url) {
-                                // Mencatat URL internal terakhir untuk keperluan navigasi 'Smart Back'.
-                                if (url != null) {
-                                  _controller.updateLastSafeUrl(url.toString());
-                                }
-                                AppLogger.d("[UI] onLoadStart: $url");
-                              },
-                              onPageCommitVisible: (controller, url) {
-                                AppLogger.d("[UI] onPageCommitVisible: Content rendered");
                               },
                               shouldOverrideUrlLoading: (controller, navigationAction) async {
-                                // Delegasi validasi navigasi ke controller (Navigation Guard).
                                 return _controller.handleNavigation(navigationAction);
                               },
-
-                              onLoadStop: (controller, url) {
-                                AppLogger.d("[UI] onLoadStop: Load complete");
-                              },
                               onReceivedError: (controller, request, error) {
-                                AppLogger.d("[UI] ❌ Error: ${error.description}");
+                                AppLogger.e("WebView error: ${error.description}");
                                 _controller.updateStatus("Error: ${error.description}");
                               },
                               onReceivedHttpError: (controller, request, errorResponse) {
-                                AppLogger.d("[UI] 🔴 HTTP Error ${errorResponse.statusCode}");
-                                _controller.updateStatus("HTTP Error ${errorResponse.statusCode}");
+                                _controller.updateStatus("HTTP ${errorResponse.statusCode}");
                               },
                               onConsoleMessage: (controller, consoleMessage) {
-                                // PRIMARY HANDLER: intercept console.log dari PKB WebView.
-                                // Deteksi finpay_navigation JSON untuk membuka Custom Tab.
-                                _controller.handleConsoleMessage(consoleMessage.message);
+                                // Primary handler: intercept console.log dari PKB
+                                _controller.handleConsoleMessage(context, consoleMessage.message);
                               },
                               onRenderProcessGone: (controller, detail) {
-                                AppLogger.d("[UI] ⚠️ WebView Crash Detected!");
+                                AppLogger.e("WebView process crashed");
                                 _controller.updateStatus("WebView Crashed");
                               },
                               onPermissionRequest: (controller, request) async {
-                                // Menangani permintaan izin hardware dari Web (Kamera, Mic, dll).
-                                AppLogger.d("[UI] Web permission req: ${request.resources}");
                                 return _controller.handleWebPermissionRequest(request);
                               },
                               onGeolocationPermissionsShowPrompt: (controller, origin) async {
-                                // Menangani permintaan izin lokasi dari Web.
-                                AppLogger.d("[UI] Geolocation req from: $origin");
                                 return _controller.handleGeolocationPrompt(origin);
                               },
                               onProgressChanged: (controller, progress) {
-                                // Memperbarui indikator loading linear.
                                 _controller.updateProgress(progress / 100.0);
                               },
                             ),
-                            // Indikator progres pemuatan (Top Bar).
+                            // Progress bar loading
                             if (state.progress < 1)
                               const Align(
                                 alignment: Alignment.topCenter,
                                 child: LinearProgressIndicator(minHeight: 2),
                               ),
-                        ],
-                      ),
+                          ],
+                        ),
                 ),
-                // Panel Debug: log tracker (simulation toolbar dihapus).
+
+                // Debug Tracker panel
                 if (_showDebug) ...[
                   ValueListenableBuilder<List<String>>(
                     valueListenable: AppLogger.logsNotifier,
@@ -236,7 +202,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                     },
                   ),
                 ],
-
               ],
             ),
           ),
