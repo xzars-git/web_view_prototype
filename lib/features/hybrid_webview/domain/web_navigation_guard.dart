@@ -6,7 +6,7 @@ enum NavigationHandling {
   /// Mengizinkan pemuatan di dalam WebView utama.
   allowWebView,
 
-  /// Membuka URL di Chrome Custom Tab (untuk E-Wallet).
+  /// Membuka URL di dalam WebView utama (Single WebView Strategy — dulunya Custom Tab).
   openInCustomTab,
 
   /// Membuka URL di aplikasi eksternal (untuk deep link skema lain).
@@ -47,7 +47,7 @@ class WebNavigationGuard {
     }
 
     // 4. URL http/https di luar whitelist -> Buka di Custom Tab (Fallback)
-    AppLogger.d("GUARD: 🌐 External host detected, redirecting to Custom Tab: ${uri.host}");
+    AppLogger.d("GUARD: 🌐 External host detected → akan di-load in-app: ${uri.host}");
     return NavigationHandling.openInCustomTab;
   }
 }

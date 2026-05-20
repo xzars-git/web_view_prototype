@@ -196,7 +196,7 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                               },
                               onConsoleMessage: (controller, consoleMessage) {
                                 // PRIMARY HANDLER: intercept console.log dari PKB WebView.
-                                // Deteksi finpay_navigation JSON untuk membuka Custom Tab.
+                                // Deteksi finpay_navigation JSON → navigasi in-app ke payment page.
                                 _controller.handleConsoleMessage(consoleMessage.message);
                               },
                               onRenderProcessGone: (controller, detail) {
