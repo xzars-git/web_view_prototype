@@ -1,4 +1,3 @@
-import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
@@ -7,7 +6,6 @@ import '../../../config/logger.dart';
 import '../application/hybrid_webview_controller.dart';
 import 'widgets/debug_tracker_overlay.dart';
 import 'widgets/permission_chip.dart';
-
 
 /// Halaman utama fitur Hybrid WebView.
 ///
@@ -21,11 +19,7 @@ class HybridWebViewPage extends StatefulWidget {
   /// Membuat instance [HybridWebViewPage].
   ///
   /// Memerlukan [config] untuk pengaturan domain/bridge dan [initialEnvironment].
-  const HybridWebViewPage({
-    super.key, 
-    required this.config, 
-    required this.initialEnvironment,
-  });
+  const HybridWebViewPage({super.key, required this.config, required this.initialEnvironment});
 
   /// Injeksi konfigurasi aplikasi.
   final AppConfig config;
@@ -103,10 +97,7 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                   tooltip: 'Toggle Debug Tracker',
                 ),
                 // Tombol reload untuk memuat ulang halaman utama dari awal.
-                IconButton(
-                  onPressed: _controller.reloadBasePage, 
-                  icon: const Icon(Icons.refresh),
-                ),
+                IconButton(onPressed: _controller.reloadBasePage, icon: const Icon(Icons.refresh)),
               ],
             ),
             body: Column(
@@ -142,10 +133,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                               initialUrlRequest: URLRequest(
                                 url: WebUri(_controller.effectiveWebViewUrl),
                               ),
-                              // Menyuntikkan JavaScript Bridge (SapawargaChannel) sebelum dokumen dimuat.
-                              initialUserScripts: UnmodifiableListView<UserScript>([
-                                _controller.bridgeUserScript,
-                              ]),
                               initialSettings: InAppWebViewSettings(
                                 javaScriptEnabled: true,
                                 useShouldOverrideUrlLoading: true,
@@ -196,7 +183,7 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                               onConsoleMessage: (controller, consoleMessage) {
                                 // PRIMARY HANDLER: intercept console.log dari PKB WebView.
                                 // Deteksi finpay_navigation JSON → navigasi in-app ke payment page.
-                                _controller.handleConsoleMessage(consoleMessage.message);
+                                _controller.handleConsoleMessage(context, consoleMessage.message);
                               },
                               onRenderProcessGone: (controller, detail) {
                                 AppLogger.d("[UI] ⚠️ WebView Crash Detected!");
@@ -223,8 +210,8 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                                 alignment: Alignment.topCenter,
                                 child: LinearProgressIndicator(minHeight: 2),
                               ),
-                        ],
-                      ),
+                          ],
+                        ),
                 ),
                 // Panel Debug: log tracker (simulation toolbar dihapus).
                 if (_showDebug) ...[
@@ -235,7 +222,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                     },
                   ),
                 ],
-
               ],
             ),
           ),

@@ -278,7 +278,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   // ── CONSOLE MESSAGE HANDLER ───────────────────────────────────────────────
 
-  void handleConsoleMessage(String message) {
+  void handleConsoleMessage(BuildContext context, String message) {
     final preview = message.length > 120 ? '${message.substring(0, 120)}...' : message;
     AppLogger.d("[JS] $preview");
 
@@ -289,32 +289,47 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
     try {
       final Map<String, dynamic> json = jsonDecode(message);
-      if (json['type'] != 'finpay_navigation') {
-        AppLogger.d("[Console] ⚠️ type='${json['type']}' — skip");
-        return;
-      }
 
-      final String? url = json['url']?.toString().trim();
-      final String? kodeBayar = json['kodeBayar']?.toString().trim();
+      if (json['type'] == 'finpay_navigation') {
+        final String? url = json['url']?.toString().trim();
+        final String? kodeBayar = json['kodeBayar']?.toString().trim();
 
-      AppLogger.d("[Console] ✅ type: finpay_navigation");
-      AppLogger.d("[Console] 🔑 kodeBayar: ${kodeBayar ?? 'NULL'}");
-      AppLogger.d("[Console] 🔗 host: ${url != null ? Uri.tryParse(url)?.host : 'null'}");
+        AppLogger.d("[Console] ✅ type: finpay_navigation");
+        AppLogger.d("[Console] 🔑 kodeBayar: ${kodeBayar ?? 'NULL'}");
+        AppLogger.d("[Console] 🔗 host: ${url != null ? Uri.tryParse(url)?.host : 'null'}");
 
-      if (url == null || url.isEmpty) {
-        AppLogger.d("[Console] ❌ URL kosong");
+        if (url == null || url.isEmpty) {
+          AppLogger.d("[Console] ❌ URL kosong");
+          AppLogger.d("[Console] ════════════════════════════════");
+          return;
+        }
+
+        AppLogger.d("[Console] → Push PaymentWebViewPage ke stack");
         AppLogger.d("[Console] ════════════════════════════════");
-        return;
+
+        // Push payment page ke atas Sambara (tidak mengganggu state Sambara)
+        _openPaymentPage(url, kodeBayar);
       }
 
-      AppLogger.d("[Console] → Push PaymentWebViewPage ke stack");
-      AppLogger.d("[Console] ════════════════════════════════");
+      if (json['type'] == 'close_tab') {
+        final String? reason = json['reason']?.toString();
+        final String? kodeBayar = json['kodeBayar']?.toString();
 
-      // Push payment page ke atas Sambara (tidak mengganggu state Sambara)
-      _openPaymentPage(url, kodeBayar);
+        AppLogger.d("[Console] ✅ type: close_tab");
+        AppLogger.d("[Console] ℹ️ reason: $reason");
+
+        // Jika sukses, hentikan polling & kirim event sukses ke Sambara
+        if (reason == 'payment_success') {
+          AppLogger.d("[Console] 💰 Payment success detected via close_tab");
+          _activeKodeBayar = null; // Menandai sudah ditangani
+        }
+
+        AppLogger.d("[Console] → Popping current page");
+        AppLogger.d("[Console] ════════════════════════════════");
+        Navigator.of(context).pop();
+      }
     } catch (e) {
       AppLogger.d("[Console] ❌ JSON parse error: $e");
-      AppLogger.d("[Console] ════════════════════════════════");
     }
   }
 
