@@ -1,107 +1,248 @@
-# Dokumen Spesifikasi Teknis: Integrasi Modul Pembayaran Web via WebView
+# Finpay Host App Integration Guide
 
-## 1. Pendahuluan
-
-Dokumen ini menyajikan spesifikasi teknis dan panduan integrasi antara Aplikasi Web (berbasis Flutter Web) dengan Aplikasi Host (Hosted App). Panduan ini ditujukan bagi tim pengembang Aplikasi Host dari instansi terkait untuk memastikan interoperabilitas sistem, pengalaman pengguna yang mulus (_seamless_), dan keandalan proses verifikasi transaksi pembayaran Finpay.
-
-## 2. Ruang Lingkup Integrasi
-
-Ruang lingkup integrasi ini mencakup:
-
-- Mekanisme komunikasi searah (pengiriman pesan) dari Aplikasi Web ke Aplikasi Host.
-- Ekstraksi parameter transaksi (URL pembayaran dan Kode Bayar) oleh Aplikasi Host.
-- Pembukaan antarmuka pembayaran pada _Custom Tab_ atau _In-App Browser_.
-- Pengecekan status transaksi pembayaran secara mandiri (_polling_) oleh Aplikasi Host.
-- Terminasi sesi pembayaran secara otomatis dan pengembalian fokus pengguna ke Aplikasi Web.
+> **Versi:** 2026-05-20 (v5 — Stack WebView Strategy)
+> **Target:** Developer Host App (Flutter/Android)
+> **Dependencies:** `flutter_inappwebview`, `dio`, `url_launcher`, `app_links`
 
 ---
 
-## 3. Alur Kerja (Workflow) Integrasi Sistem
+## 1. Arsitektur Integrasi
 
-Proses integrasi ini dirancang agar Aplikasi Host dapat mengambil alih proses _checkout_ dan memverifikasinya di latar belakang, tanpa mengganggu _state_ dari Aplikasi Web. Berikut adalah urutan alur kerjanya:
-
-1.**Inisiasi Pembayaran:** Pengguna memicu proses pembayaran melalui antarmuka Aplikasi Web yang sedang dimuat di dalam komponen WebView Aplikasi Host.
-
-2.**Transmisi Data:** Aplikasi Web mentransmisikan pesan berformat JSON yang memuat parameter `url` (tautan Finpay) dan `kodeBayar` melalui metode keluaran konsol (_console log_).
-
-3.**Intersepsi Data:** Aplikasi Host secara aktif mengintersepsi pesan konsol tersebut, kemudian memvalidasi dan mengekstraksi URL beserta Kode Bayar.
-
-4.**Pembukaan Sesi Pembayaran:** Aplikasi Host membuka tautan URL yang diterima menggunakan antarmuka _Custom Tab_ (misalnya: Chrome Custom Tabs untuk Android atau SFSafariViewController untuk iOS) di atas antarmuka WebView.
-
-5.**Verifikasi Latar Belakang (API Polling):** Selama _Custom Tab_ aktif di layar, Aplikasi Host wajib menjalankan proses di latar belakang (_background task_) untuk melakukan pengecekan status pembayaran secara periodik (_polling_) ke Endpoint API Backend menggunakan parameter Kode Bayar.
-
-6.**Penanganan Sukses (Auto-close):** Apabila sistem mendapatkan respon bahwa pembayaran telah **berhasil**, Aplikasi Host secara terprogram akan menutup _Custom Tab_, sehingga tampilan secara otomatis kembali ke Aplikasi Web yang ada di WebView.
-
----
-
-## 4. Spesifikasi Implementasi Teknis
-
-### 4.1. Pengiriman Data dari Aplikasi Web
-
-Aplikasi Web akan menembakkan sebuah _event_ log menggunakan metode standar JavaScript. Dalam lingkungan Flutter Web, perintah yang dieksekusi adalah sebagai berikut:
-
-```javascript
-// Contoh representasi di dalam eksekusi aplikasi web
-
-console.log(
-  '{"type":"finpay_navigation","url":"https://url-pembayaran-finpay.com/...","kodeBayar":"1234567890"}',
-);
+```
+┌──────────────────────────────────────────────────────────┐
+│                    HOST APP (Flutter)                     │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  HybridWebViewPage (Route Utama)                 │    │
+│  │  ┌──────────────────────────────────────────┐    │    │
+│  │  │  InAppWebView: Sambara PKB               │    │    │
+│  │  │  • console.log listener                  │    │    │
+│  │  │  • JS Bridge (SapawargaChannel)          │    │    │
+│  │  │  • Navigation Guard (whitelist)          │    │    │
+│  │  └──────────────────────────────────────────┘    │    │
+│  │  HybridWebViewController:                        │    │
+│  │  • Polling Dio (5 detik, max 15 menit)           │    │
+│  │  • Push/Pop PaymentWebViewPage                   │    │
+│  │  • Dispatch JS events ke Sambara                 │    │
+│  └──────────────────────────────────────────────────┘    │
+│                          │ Navigator.push()              │
+│                          ▼                               │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  PaymentWebViewPage (Route Terpisah)             │    │
+│  │  ┌──────────────────────────────────────────┐    │    │
+│  │  │  InAppWebView: Payment Gateway           │    │    │
+│  │  │  • ALLOW all HTTP/HTTPS navigation       │    │    │
+│  │  │  • External scheme → launchUrl           │    │    │
+│  │  │  • Custom user agent                     │    │    │
+│  │  └──────────────────────────────────────────┘    │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
 ```
 
-**Struktur _Payload_ (JSON):**
+---
+
+## 2. Tanggung Jawab Host App
+
+### A. Menjalankan Sambara di WebView Utama
+- Load URL Sambara dengan InAppWebView
+- Inject JS bridge `SapawargaChannel` via UserScript (AT_DOCUMENT_START)
+- Handle permission (kamera, lokasi)
+
+### B. Mendengarkan Trigger dari Sambara
+Sambara mengirim trigger pembayaran via `console.log`:
 
 ```json
 {
-  "type": "finpay_navigation",
-
-  "url": "https://...",
-
-  "kodeBayar": "1234567890"
+    "type": "finpay_navigation",
+    "url": "https://m.dana.id/n/cashier/...",
+    "kodeBayar": "3222002005265231"
 }
 ```
 
-**Keterangan Atribut:**
+Host app menangkap via `onConsoleMessage` callback InAppWebView.
 
--`type` (String): _Identifier_ wajib dengan nilai mutlak `"finpay_navigation"`. Parameter ini digunakan oleh Aplikasi Host untuk membedakan _event_ navigasi pembayaran dari log sistem lainnya.
+### C. Push Payment Page ke Navigator Stack
+- **BUKAN** mengganti URL di WebView Sambara
+- **BUKAN** membuka Chrome Custom Tab
+- Push `PaymentWebViewPage` sebagai route baru di atas Sambara
+- Sambara tetap hidup, state 100% preserved
 
--`url` (String): Tautan halaman tagihan Finpay yang harus dimuat dan ditampilkan kepada pengguna.
+### D. Polling Status Pembayaran
+- **Library:** Dio (persistent connection pool)
+- **Interval:** 5 detik
+- **Batas:** 15 menit
+- **Endpoint:** `POST /api/check-dummy-payment-status`
+- **Kondisi paid:** `success == true && code == "0000"`
 
--`kodeBayar` (String): Nomor referensi unik transaksi. Parameter ini wajib disimpan oleh Aplikasi Host sebagai kunci (_key_) untuk mengecek status pembayaran ke API.
+### E. Dispatch Events ke Sambara
+Host app mengirim CustomEvent ke WebView Sambara:
+- `paymentCompleted` → saat pembayaran lunas (API return paid)
+- `paymentHold` → saat user cancel (back dari payment page)
 
-### 4.2. Penerimaan Data oleh Aplikasi Host
+### F. TIDAK Dilakukan oleh Host App
+- ❌ Tidak menampilkan dialog konfirmasi pembatalan (Sambara yang handle)
+- ❌ Tidak melakukan whitelist pada URL dari console.log (sudah difilter Sambara)
+- ❌ Tidak menggunakan Chrome Custom Tab
 
-Aplikasi Host wajib mengonfigurasi komponen WebView-nya untuk mendengarkan (_listen_) aktivitas log konsol dari Aplikasi Web. Ketika log masuk, Aplikasi Host perlu melakukan langkah berikut:
+---
 
-1. Tangkap _event_ konsol (misalnya melalui `onConsoleMessage` pada _controller_ WebView).
-2. Lakukan _parsing_ (_Try-Catch_) nilai string dari konsol ke dalam bentuk objek JSON.
-3. Lakukan pengondisian: Apabila _key_ `type` bernilai `"finpay_navigation"`, maka lanjutkan ke tahap ekstraksi parameter `url` dan `kodeBayar`.
+## 3. Alur Lengkap
 
-### 4.3. Penanganan Tautan Pembayaran (Custom Tab)
+### Skenario 1: Pembayaran Berhasil
+```
+1. User klik "Bayar" di Sambara
+2. Sambara console.log({ type:"finpay_navigation", url, kodeBayar })
+3. Host: handleConsoleMessage() → detect finpay_navigation
+4. Host: _openPaymentPage(url, kodeBayar)
+   a. Set _isPaymentPageOpen = true
+   b. Start polling (5 detik interval)
+   c. Navigator.push(PaymentWebViewPage)
+5. User melihat halaman DANA/QRIS di payment page
+6. User bayar di DANA
+7. Polling detect isPaid = true
+8. Host: Navigator.pop() → payment page hilang
+9. Sambara muncul kembali di last state ✅
+10. Host: dispatch paymentCompleted ke Sambara (500ms delay)
+11. Sambara update UI
+```
 
-Setelah `url` divalidasi, Aplikasi Host dilarang memuat tautan tersebut di dalam WebView yang sama untuk menghindari teresetnya sesi (_state_) Aplikasi Web.
+### Skenario 2: User Cancel
+```
+1-5. (sama dengan skenario 1)
+6. User tekan Back di payment page
+7. Navigator.pop() otomatis
+8. Sambara muncul kembali di last state ✅
+9. Host: polling masih jalan → stop + dispatch paymentHold
+10. Sambara tampilkan dialog konfirmasi pembatalan
+```
 
-Aplikasi Host **diwajibkan** untuk meluncurkan komponen browser _native_ yang terintegrasi di dalam aplikasi (seperti _Chrome Custom Tabs_ atau mode _in-app browser_ bawaan sistem operasi). Antarmuka ini akan muncul sebagai _overlay_ menutupi WebView.
+### Skenario 3: Timeout (15 menit)
+```
+1-5. (sama dengan skenario 1)
+6. 15 menit berlalu tanpa pembayaran
+7. Polling auto-stop
+8. Payment page masih terbuka — user bisa continue atau back
+```
 
-### 4.4. Pengecekan Status Pembayaran (API Polling)
+---
 
-Langkah kritikal dalam integrasi ini adalah verifikasi transaksi. Segera setelah _Custom Tab_ dimuat, Aplikasi Host harus menginisiasi proses pengecekan status (_API Polling_).
+## 4. Kontrak Event JavaScript
 
-**Spesifikasi Proses Polling:**
+### paymentCompleted (Host → Sambara)
 
--**Trigger Awal:** Dimulai bersamaan atau beberapa saat setelah perintah buka _Custom Tab_ dieksekusi.
+```javascript
+// Dispatched oleh Host saat API return isPaid = true
+window.dispatchEvent(new CustomEvent('paymentCompleted', {
+    detail: {
+        ts: Date.now(),
+        kodeBayar: '3222002005265231',
+        status: 'success'
+    }
+}));
+```
 
--**Interval:** Proses penembakan API dilakukan secara periodik, misalnya setiap 3 hingga 5 detik (bergantung pada spesifikasi _rate-limit_ server backend instansi).
+### paymentHold (Host → Sambara)
 
--**Parameter Request:** Menggunakan `kodeBayar` yang telah di-ekstrak pada langkah 4.2.
+```javascript
+// Dispatched oleh Host saat user back dari payment page
+window.dispatchEvent(new CustomEvent('paymentHold', {
+    detail: {
+        ts: Date.now(),
+        kodeBayar: '3222002005265231'
+    }
+}));
+```
 
--**Terminasi Polling (Pemberhentian Siklus):** Proses ini wajib dihentikan (_cancel/dispose_) apabila terjadi salah satu kondisi berikut:
+### Listener di Sambara:
 
-1. API mengembalikan status pembayaran **SUKSES**.
-2. Pengguna membatalkan pembayaran dengan menekan tombol kembali/silang (_close_) pada _Custom Tab_ secara manual.
-3. Mencapai batas waktu maksimal transaksi (_Timeout_) yang ditentukan oleh sistem (misalnya: 15 menit).
+```javascript
+window.addEventListener('paymentCompleted', (e) => {
+    // Update UI — pembayaran sukses
+    console.log('Paid:', e.detail.kodeBayar);
+});
 
-### 4.5. Terminasi Sesi Pembayaran (_Callback_ Keberhasilan)
+window.addEventListener('paymentHold', (e) => {
+    // Tampilkan dialog konfirmasi pembatalan
+    console.log('Hold:', e.detail.kodeBayar);
+});
+```
 
-Sistem Aplikasi Host harus merespons secara otomatis (_programmatically_) ketika kondisi terminasi nomor 1 (Pembayaran Sukses) pada poin 4.4 terpenuhi.
+---
 
-Aplikasi Host **wajib memerintahkan penutupan layar Custom Tab secara terprogram** (_dismiss/close programmatic_). Saat layar tertutup, pengguna akan melihat kembali antarmuka Aplikasi Web secara utuh. Aplikasi Web selanjutnya memiliki tanggung jawab penuh untuk mendeteksi perubahan state dan menyajikan halaman resi/sukses kepada pengguna.
+## 5. API Backend (Dummy)
+
+### Endpoint
+
+```
+POST http://192.168.99.46:8700/api/check-dummy-payment-status
+Content-Type: application/json
+
+{ "kodeBayar": "3222002005265231" }
+```
+
+### Response — Belum Bayar
+
+```json
+{
+    "success": false,
+    "code": "0003",
+    "message": "Tagihan belum dibayar",
+    "param": { "kodeBayar": "3222002005265231" }
+}
+```
+
+### Response — Sudah Bayar
+
+```json
+{
+    "success": true,
+    "code": "0000",
+    "message": "Tagihan sudah berhasil dibayar",
+    "param": { "kodeBayar": "3222002005265231" }
+}
+```
+
+### Logika isPaid:
+
+```dart
+final bool isPaid = body['success'] == true && body['code'] == '0000';
+```
+
+---
+
+## 6. File Struktur
+
+```
+lib/
+├── config/
+│   ├── app_config.dart          # Whitelist domain, deep link config
+│   └── logger.dart              # AppLogger utility
+├── features/hybrid_webview/
+│   ├── application/
+│   │   ├── hybrid_webview_controller.dart  # Controller utama (polling, events)
+│   │   └── web_permission_service.dart     # Permission handler
+│   ├── domain/
+│   │   └── web_navigation_guard.dart       # Whitelist navigation guard
+│   └── presentation/
+│       ├── hybrid_webview_page.dart         # Sambara WebView page
+│       ├── payment_webview_page.dart        # Payment gateway page (BARU)
+│       └── widgets/
+│           ├── debug_tracker_overlay.dart
+│           └── permission_chip.dart
+└── app.dart / main.dart
+```
+
+---
+
+## 7. Konfigurasi Penting
+
+| Parameter | Nilai | Lokasi |
+|-----------|-------|--------|
+| Polling interval | 5 detik | `_pollingInterval` di controller |
+| Polling max duration | 15 menit | `_pollingMaxDuration` di controller |
+| API base URL | `http://192.168.99.46:8700` | Dio `BaseOptions.baseUrl` |
+| API timeout | 5 detik (connect/receive/send) | Dio `BaseOptions` |
+| Deep link scheme | `pocapp` | `AppConfig.deepLinkScheme` |
+| Deep link host | `payment` | `AppConfig.deepLinkHost` |
+| Bridge name | `SapawargaChannel` | `AppConfig.bridgeName` |
+| Allowed hosts | `test-sambara.vercel.app`, `live.finpay.id` | `AppConfig._allowedHostsEnv` |

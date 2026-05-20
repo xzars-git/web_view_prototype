@@ -1,24 +1,52 @@
-# Snippet Code — Host App Payment Integration (Single WebView Strategy)
+# Snippet Code — Host App Payment Integration (Stack WebView Strategy)
 
-> **Versi:** 2026-05-20 (v4 — Single WebView, Foreground Polling, Dio)
-> **File sumber:** `hybrid_webview_controller.dart`
+> **Versi:** 2026-05-20 (v5 — Stack Navigator, Foreground Polling, Dio)
+> **File sumber:** `hybrid_webview_controller.dart`, `payment_webview_page.dart`
 > **Package:** `flutter_inappwebview`, `dio`, `url_launcher`, `app_links`
-> **Strategi:** Tidak pakai Custom Tab — payment page di-load langsung di WebView yang sama.
+> **Strategi:** PaymentWebViewPage di-push di atas Sambara via Navigator stack.
 
 ---
 
-## Mengapa Single WebView?
+## Arsitektur: Stack WebView Strategy
 
-Custom Tab menyebabkan app masuk background → OS Android throttle network → polling gagal.
-Dengan load payment URL di WebView yang sama, app tetap foreground dan polling stabil.
+```
+Flutter Navigator Stack:
+┌─────────────────────────────────┐  ← PaymentWebViewPage (ROUTE BARU)
+│  WebView: https://m.dana.id/... │    - Menampilkan halaman payment gateway
+│  ↕ Back → pop() ke Sambara     │    - Semua redirect ALLOW di dalam
+│  ↕ isPaid → auto pop()         │    - Non-http scheme → launchUrl external
+└─────────────────────────────────┘
+┌─────────────────────────────────┐  ← HybridWebViewPage (TETAP HIDUP)
+│  WebView: Sambara               │    - State 100% dipertahankan
+│  (tidak di-dispose/reload)      │    - Menerima event JS setelah pop
+│  Polling Dio tetap jalan ✅     │    - Controller milik layer ini
+└─────────────────────────────────┘
+```
+
+### Kenapa Stack, Bukan Replace URL?
+
+| Replace URL (lama) | Stack Navigator (sekarang) |
+|---|---|
+| Load payment di WebView yang sama | Push route baru di atas Sambara |
+| Sambara ter-reload saat kembali | Sambara **100% preserved** |
+| State hilang (kembali ke beranda) | State tetap di halaman terakhir |
+| JS event mungkin hilang | JS event diterima karena WebView masih hidup |
 
 ---
 
 ## 1. Menerima Trigger dari Console Log
 
+Sambara mengirim JSON via `console.log`:
+
 ```json
-{ "type": "finpay_navigation", "url": "https://m.dana.id/...", "kodeBayar": "3222002005265231" }
+{
+    "type": "finpay_navigation",
+    "url": "https://m.dana.id/n/cashier/new/checkout?bizNo=...",
+    "kodeBayar": "3222002005265231"
+}
 ```
+
+### Snippet — Controller (handleConsoleMessage):
 
 ```dart
 void handleConsoleMessage(String message) {
@@ -32,94 +60,121 @@ void handleConsoleMessage(String message) {
 
   if (url == null || url.isEmpty) return;
 
-  _activeKodeBayar = kodeBayar;
-  _isOnPaymentPage = true;
-
-  // Load payment page di WebView yang SAMA (bukan Custom Tab)
-  _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
-  _startPaymentStatusPolling();
+  // Push payment page ke atas Sambara
+  _openPaymentPage(url, kodeBayar);
 }
 ```
 
 ---
 
-## 2. Foreground Polling (Dio, 5 detik, max 15 menit)
+## 2. Push Payment Page ke Stack
+
+```dart
+Future<void> _openPaymentPage(String url, String? kodeBayar) async {
+  if (_isPaymentPageOpen) return; // Guard: cegah double push
+
+  _activeKodeBayar = kodeBayar;
+  _isPaymentPageOpen = true;
+
+  // Start polling SEBELUM push
+  _startPaymentStatusPolling();
+
+  // Push → Sambara tetap hidup di bawah
+  await Navigator.of(ctx).push(
+    MaterialPageRoute(
+      builder: (_) => PaymentWebViewPage(paymentUrl: url, kodeBayar: kodeBayar ?? ''),
+    ),
+  );
+
+  // ↓ Kode di bawah ini jalan setelah payment page di-pop ↓
+  _isPaymentPageOpen = false;
+  if (_paymentStatusPoller != null) {
+    _stopPaymentStatusPolling();
+    _notifyPaymentHold();  // User cancel — beritahu Sambara
+  }
+  _activeKodeBayar = null;
+}
+```
+
+---
+
+## 3. Payment WebView Page (Halaman Terpisah)
+
+```dart
+class PaymentWebViewPage extends StatefulWidget {
+  final String paymentUrl;
+  final String kodeBayar;
+  // ...
+}
+```
+
+### Fitur:
+- **ALLOW semua navigasi HTTP/HTTPS** — tanpa whitelist (sudah difilter Sambara)
+- **Non-http scheme** (`intent://`, `dana://`) → `launchUrl` external
+- **Custom User Agent** → agar payment gateway tidak block WebView
+- **Back button** → `Navigator.pop()` → kembali ke Sambara
+
+---
+
+## 4. Foreground Polling (Dio, 5 detik, max 15 menit)
+
+Polling berjalan di controller (milik HybridWebViewPage) — **tidak bergantung** pada PaymentWebViewPage.
 
 ```dart
 final Dio _dio = Dio(BaseOptions(
   baseUrl: 'http://192.168.99.46:8700',
-  connectTimeout: const Duration(seconds: 5),
-  receiveTimeout: const Duration(seconds: 5),
+  connectTimeout: Duration(seconds: 5),
+  receiveTimeout: Duration(seconds: 5),
   contentType: 'application/json',
 ));
 
-static const Duration _pollingInterval = Duration(seconds: 5);
-static const Duration _pollingMaxDuration = Duration(minutes: 15);
+// Cek status pembayaran
+final response = await _dio.post<Map<String, dynamic>>(
+  '/api/check-dummy-payment-status',
+  data: {'kodeBayar': _activeKodeBayar},
+);
 
-Future<void> _checkPaymentStatus() async {
-  final response = await _dio.post<Map<String, dynamic>>(
-    '/api/check-dummy-payment-status',
-    data: {'kodeBayar': _activeKodeBayar},
-  );
+final bool isPaid = body['success'] == true && body['code'] == '0000';
 
-  if (response.statusCode == 200 && response.data != null) {
-    final body = response.data!;
-    final bool isPaid = body['success'] == true && body['code'] == '0000';
-
-    if (isPaid) {
-      _stopPaymentStatusPolling();
-      await _returnToSambara();  // Kembali ke halaman Sambara
-      Future.delayed(Duration(milliseconds: 1500), () {
-        _notifyPaymentCompleted();  // Dispatch event setelah halaman loaded
-      });
-    }
-  }
+if (isPaid) {
+  _stopPaymentStatusPolling();
+  Navigator.of(ctx).pop();              // Pop payment page
+  _notifyPaymentCompleted();            // Beritahu Sambara (setelah delay 500ms)
 }
 ```
 
-### API Response (contoh sukses):
+### API Response (sukses):
 
 ```json
 {
     "success": true,
     "code": "0000",
-    "message": "Tagihan dengan kode bayar 3222002005265231 sudah berhasil dibayar",
+    "message": "Tagihan sudah berhasil dibayar",
     "param": { "kodeBayar": "3222002005265231" }
 }
 ```
 
 ---
 
-## 3. Back Button → paymentHold
+## 5. Events ke Sambara (PKB)
 
-```dart
-Future<void> smartGoBack() async {
-  if (_isOnPaymentPage) {
-    _stopPaymentStatusPolling();
-    _notifyPaymentHold();       // Beritahu PKB user membatalkan
-    await _returnToSambara();   // Kembali ke halaman Sambara
-    return;
-  }
-  // Navigasi back biasa di Sambara
-  if (await _webViewController!.canGoBack()) {
-    await _webViewController!.goBack();
-  }
-}
-```
+| Event | Payload | Kapan Dispatch |
+|-------|---------|----------------|
+| `paymentHold` | `{ts, kodeBayar}` | User tekan Back di payment page |
+| `paymentCompleted` | `{ts, kodeBayar, status:'success'}` | API return `code: "0000"` (paid) |
 
----
+### Listener di Sambara:
 
-## 4. Navigation Guard Bypass
+```javascript
+window.addEventListener('paymentHold', function(event) {
+    console.log('Payment dibatalkan:', event.detail.kodeBayar);
+    // Sambara tampilkan dialog konfirmasi pembatalan
+});
 
-Saat `_isOnPaymentPage == true`, SEMUA navigasi diizinkan di WebView (payment redirect, etc):
-
-```dart
-Future<NavigationActionPolicy> handleNavigation(NavigationAction action) async {
-  if (_isOnPaymentPage) {
-    return NavigationActionPolicy.ALLOW;  // Bypass guard
-  }
-  // Normal guard logic...
-}
+window.addEventListener('paymentCompleted', function(event) {
+    console.log('Pembayaran sukses:', event.detail.kodeBayar);
+    // Sambara update UI status pembayaran
+});
 ```
 
 ---
@@ -127,26 +182,55 @@ Future<NavigationActionPolicy> handleNavigation(NavigationAction action) async {
 ## Alur Lengkap
 
 ```
-PKB console.log({ type:"finpay_navigation", url, kodeBayar })
+Sambara: console.log({ type:"finpay_navigation", url, kodeBayar })
   │
   ▼
-Host: handleConsoleMessage() → _isOnPaymentPage = true
+Controller: handleConsoleMessage() → _openPaymentPage()
   │
-  ├─ loadUrl(paymentUrl) → WebView menampilkan halaman pembayaran
+  ├─ Set _activeKodeBayar, _isPaymentPageOpen = true
   ├─ _startPaymentStatusPolling() → tiap 5 detik, max 15 menit
+  ├─ Navigator.push(PaymentWebViewPage)
+  │     │
+  │     │  ← User melihat halaman payment (DANA/QRIS/dll)
+  │     │  ← Sambara tetap hidup di background
+  │     │
+  │     ├─── isPaid (code=0000) ──► Navigator.pop() + paymentCompleted
+  │     │                           Sambara muncul di last state ✅
+  │     │
+  │     ├─── User Back ────────────► Navigator.pop() + paymentHold
+  │     │                           Sambara muncul di last state ✅
+  │     │
+  │     ├─── Deep link pocapp:// ──► Navigator.pop()
+  │     │
+  │     └─── 15 menit habis ───────► Polling stop otomatis
   │
-  ├─── isPaid (code=0000) ─► _returnToSambara() → dispatch paymentCompleted
-  │
-  ├─── User tekan Back ────► _notifyPaymentHold() → _returnToSambara()
-  │
-  └─── 15 menit habis ─────► _stopPaymentStatusPolling()
+  ▼
+Controller: (setelah pop) → cleanup _activeKodeBayar
 ```
 
 ---
 
-## Events ke PKB
+## Yang Dilakukan Host App (Ringkasan)
 
-| Event | Payload | Kapan |
-|-------|---------|-------|
-| `paymentCompleted` | `{ts, kodeBayar, status:'success'}` | API polling return `code:"0000"` |
-| `paymentHold` | `{ts, kodeBayar}` | User tekan Back di halaman pembayaran |
+### 1. Menjalankan Sambara di WebView utama
+- Load URL Sambara di `InAppWebView` dengan JS bridge (`SapawargaChannel`)
+
+### 2. Mendengarkan console.log dari Sambara
+- Intercept `finpay_navigation` JSON → extract `url` dan `kodeBayar`
+
+### 3. Push Payment Page ke Navigator Stack
+- `PaymentWebViewPage` terbuka di atas Sambara
+- Semua navigasi di payment page diizinkan (tanpa whitelist)
+
+### 4. Polling Status Pembayaran (Foreground)
+- Dio POST ke backend setiap 5 detik
+- Cek `success == true && code == '0000'`
+
+### 5. Auto-Return saat Paid
+- Pop payment page → Sambara muncul di last state
+- Dispatch `paymentCompleted` ke Sambara via JS
+
+### 6. Handle User Cancel
+- User tekan Back → Pop payment page
+- Dispatch `paymentHold` ke Sambara
+- Sambara tampilkan dialog konfirmasi pembatalan sendiri
