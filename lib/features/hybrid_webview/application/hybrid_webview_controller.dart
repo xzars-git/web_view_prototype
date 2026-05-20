@@ -104,6 +104,10 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   /// Flag untuk mencegah polling concurrent.
   bool _isPollingPayment = false;
 
+  /// Counter error berturut-turut saat polling — untuk suppress noise di log.
+  int _pollingErrorCount = 0;
+  static const int _maxPollingErrorLog = 3; // log error hanya N kali berturut-turut
+
   /// BuildContext untuk menampilkan dialog — di-set dari page.
   BuildContext? _dialogContext;
 
@@ -124,9 +128,11 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   void _initBrowser([ChromeSafariBrowser? browser]) {
     _browser = browser ?? _PaymentChromeBrowser(
       onClosedCallback: () {
-        // User tutup Custom Tab → tampilkan dialog konfirmasi pembatalan.
-        // Jangan langsung notify paymentCompleted; biarkan user memilih.
-        AppLogger.d("[Browser] Custom Tab closed by user — showing hold dialog");
+        AppLogger.d("[Browser] ════════════════════════════════");
+        AppLogger.d("[Browser] 🔴 Custom Tab DITUTUP oleh user");
+        AppLogger.d("[Browser] kodeBayar aktif: ${_activeKodeBayar ?? 'null'}");
+        AppLogger.d("[Browser] → Stop polling + tampilkan dialog konfirmasi");
+        AppLogger.d("[Browser] ════════════════════════════════");
         _stopPaymentStatusPolling();
         _showPaymentHoldDialog();
       },
@@ -181,23 +187,27 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   /// Guard double-fire: jika sudah dipanggil dalam 3 detik terakhir, skip.
   void _notifyPaymentCompleted() {
     if (_paymentNotified) {
-      AppLogger.d("[Payment] Already notified — skipping duplicate dispatch");
+      AppLogger.d("[Payment] ⚠️ Duplicate dispatch dicegah — sudah dikirim dalam 3 detik terakhir");
       return;
     }
     _paymentNotified = true;
-    AppLogger.d("[Payment] Dispatching '${_config.paymentEventName}' event");
+    AppLogger.d("[Payment] ════════════════════════════════");
+    AppLogger.d("[Payment] ✅ DISPATCH event '${_config.paymentEventName}' ke PKB");
+    AppLogger.d("[Payment] ════════════════════════════════");
     _webViewController?.evaluateJavascript(
-      // CustomEvent dengan detail memudahkan tracing di PKB side
       source: "window.dispatchEvent(new CustomEvent('${_config.paymentEventName}', {detail:{ts:Date.now()}}));",
     );
-    // Auto-reset flag setelah 3 detik agar bisa handle transaksi berikutnya
     Future.delayed(const Duration(seconds: 3), () => _paymentNotified = false);
   }
 
   /// Dispatch event 'paymentHold' ke PKB WebView.
   /// Menginformasikan bahwa user menutup Custom Tab tanpa menyelesaikan pembayaran.
   void _notifyPaymentHold() {
-    AppLogger.d("[Payment] Dispatching 'paymentHold' event to PKB");
+    AppLogger.d("[Payment] ════════════════════════════════");
+    AppLogger.d("[Payment] 🔴 DISPATCH event 'paymentHold' ke PKB");
+    AppLogger.d("[Payment] kodeBayar: ${_activeKodeBayar ?? 'null'}");
+    AppLogger.d("[Payment] PKB diharapkan hit API pembatalan setelah ini");
+    AppLogger.d("[Payment] ════════════════════════════════");
     _webViewController?.evaluateJavascript(
       source: "window.dispatchEvent(new CustomEvent('paymentHold', {detail:{ts:Date.now(), kodeBayar:'${_activeKodeBayar ?? ''}'}}));",
     );
@@ -267,47 +277,59 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   /// Dipanggil dari onConsoleMessage di presentation layer.
   /// Mendeteksi JSON finpay_navigation dan memproses pembukaan Custom Tab.
   void handleConsoleMessage(String message) {
-    // Log semua console message ke debug tracker
-    AppLogger.d("[JS] $message");
+    // Log semua console message (kecuali yg terlalu panjang)
+    final preview = message.length > 120 ? '${message.substring(0, 120)}...' : message;
+    AppLogger.d("[JS] $preview");
 
-    // Coba parse sebagai JSON finpay_navigation
+    // Quick-check sebelum JSON parse
     if (!message.contains('finpay_navigation')) return;
+
+    AppLogger.d("[Console] ════════════════════════════════");
+    AppLogger.d("[Console] 📨 Mendeteksi finpay_navigation di console message");
 
     try {
       final Map<String, dynamic> json = jsonDecode(message);
-      if (json['type'] != 'finpay_navigation') return;
+      if (json['type'] != 'finpay_navigation') {
+        AppLogger.d("[Console] ⚠️ JSON valid tapi type='${json['type']}' — bukan finpay_navigation, skip");
+        return;
+      }
 
       final String? url = json['url']?.toString().trim();
       final String? kodeBayar = json['kodeBayar']?.toString().trim();
 
+      AppLogger.d("[Console] ✅ type: finpay_navigation");
+      AppLogger.d("[Console] 🔑 kodeBayar: ${kodeBayar ?? '⚠️ NULL — polling tidak akan berjalan!'}");
+      AppLogger.d("[Console] 🔗 url host: ${url != null ? Uri.tryParse(url)?.host ?? 'parse error' : 'null'}");
+
       if (url == null || url.isEmpty) {
-        AppLogger.d("[Console] finpay_navigation received but URL is empty");
+        AppLogger.d("[Console] ❌ URL kosong — batalkan proses");
+        AppLogger.d("[Console] ════════════════════════════════");
         return;
       }
 
-      AppLogger.d("[Console] finpay_navigation detected");
-      AppLogger.d("[Console] URL: ${_sanitizeUrl(url)}");
-      AppLogger.d("[Console] kodeBayar: ${kodeBayar ?? 'null'}");
-
-      // Simpan kodeBayar untuk polling status
-      _activeKodeBayar = kodeBayar;
-
-      // Validasi URL: hanya https://
+      // Validasi scheme
       final uri = Uri.tryParse(url);
       if (uri == null || uri.scheme != 'https') {
-        AppLogger.d("[Console] Rejected: non-HTTPS URL");
+        AppLogger.d("[Console] ❌ URL ditolak — scheme='${uri?.scheme}', harus https://");
+        AppLogger.d("[Console] ════════════════════════════════");
         return;
       }
 
-      // Simpan URL untuk kemungkinan reopen setelah paymentHold
+      // Simpan state
+      _activeKodeBayar = kodeBayar;
       _lastCustomTabUrl = url;
+      _pollingErrorCount = 0; // reset error counter untuk transaksi baru
 
-      // Buka Custom Tab + mulai polling status
+      AppLogger.d("[Console] → Membuka Custom Tab + memulai polling");
+      AppLogger.d("[Console] ════════════════════════════════");
+
       _webViewController?.stopLoading();
       _openInCustomTabs(url);
 
     } catch (e) {
-      // Bukan JSON valid atau bukan finpay_navigation — abaikan
+      AppLogger.d("[Console] ❌ JSON parse error: $e");
+      AppLogger.d("[Console] Raw message: $message");
+      AppLogger.d("[Console] ════════════════════════════════");
     }
   }
 
@@ -318,12 +340,16 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   void _startPaymentStatusPolling() {
     if (_activeKodeBayar == null || _activeKodeBayar!.isEmpty) {
-      AppLogger.d("[Polling] No active kodeBayar — skip polling");
+      AppLogger.d("[Polling] ⚠️ Tidak ada kodeBayar — polling tidak dimulai");
       return;
     }
 
     _stopPaymentStatusPolling();
-    AppLogger.d("[Polling] Started — kodeBayar: $_activeKodeBayar (interval: 3s)");
+    _pollingErrorCount = 0;
+    AppLogger.d("[Polling] ▶️ Polling DIMULAI");
+    AppLogger.d("[Polling] kodeBayar : $_activeKodeBayar");
+    AppLogger.d("[Polling] interval  : 3 detik");
+    AppLogger.d("[Polling] endpoint  : http://192.168.99.46:8700/api/check-dummy-payment-status");
 
     _paymentStatusPoller = Timer.periodic(const Duration(seconds: 3), (_) {
       _checkPaymentStatus();
@@ -331,6 +357,9 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   }
 
   void _stopPaymentStatusPolling() {
+    if (_paymentStatusPoller != null) {
+      AppLogger.d("[Polling] ⏹️ Polling DIHENTIKAN");
+    }
     _paymentStatusPoller?.cancel();
     _paymentStatusPoller = null;
     _isPollingPayment = false;
@@ -345,42 +374,67 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
     _isPollingPayment = true;
     try {
-      final url = Uri.parse('http://192.168.99.46:8700/api/check-dummy-payment-status');
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'kodeBayar': _activeKodeBayar}),
-      );
+      final endpoint = Uri.parse('http://192.168.99.46:8700/api/check-dummy-payment-status');
+      final requestBody = jsonEncode({'kodeBayar': _activeKodeBayar});
+
+      AppLogger.d("[Polling] 🔄 POST $endpoint");
+      AppLogger.d("[Polling] Request body: $requestBody");
+
+      final response = await http
+          .post(
+            endpoint,
+            headers: {'Content-Type': 'application/json'},
+            body: requestBody,
+          )
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => throw Exception('Request timeout setelah 5 detik — pastikan device dan server di WiFi yang sama'),
+          );
+
+      AppLogger.d("[Polling] Response status : ${response.statusCode}");
+      AppLogger.d("[Polling] Response body   : ${response.body}");
 
       if (response.statusCode == 200) {
         final Map<String, dynamic> body = jsonDecode(response.body);
-        // Cek apakah status pembayaran sudah true
         final bool isPaid = body['data']?['status'] == true ||
                             body['data']?['is_paid'] == true ||
-                            body['success'] == true && body['data']?['status_payment'] == true;
+                            (body['success'] == true && body['data']?['status_payment'] == true);
+
+        AppLogger.d("[Polling] isPaid: $isPaid");
+        _pollingErrorCount = 0; // reset karena request berhasil
 
         if (isPaid) {
-          AppLogger.d("[Polling] Payment status: PAID ✅ — closing Custom Tab");
+          AppLogger.d("[Polling] ════════════════════════════════");
+          AppLogger.d("[Polling] 💰 Status LUNAS — menutup Custom Tab otomatis");
+          AppLogger.d("[Polling] ════════════════════════════════");
           _stopPaymentStatusPolling();
-
-          // Reset flag agar bisa dispatch
           _paymentNotified = false;
           _notifyPaymentCompleted();
-
-          // Tutup Custom Tab otomatis
           if (_browser.isOpened()) {
+            AppLogger.d("[Polling] 🔒 Menutup Custom Tab...");
             await _browser.close();
           }
-
-          // Bersihkan state
           _activeKodeBayar = null;
           _lastCustomTabUrl = null;
           return;
+        } else {
+          AppLogger.d("[Polling] ⏳ Status belum lunas — lanjut polling");
+        }
+      } else {
+        AppLogger.d("[Polling] ⚠️ HTTP ${response.statusCode} — response tidak 200");
+      }
+    } catch (e) {
+      _pollingErrorCount++;
+      // Log error penuh hanya N kali pertama — setelah itu ringkas, agar tidak spam
+      if (_pollingErrorCount <= _maxPollingErrorLog) {
+        AppLogger.d("[Polling] Error ke-$_pollingErrorCount/$_maxPollingErrorLog: $e");
+        if (_pollingErrorCount == 1) {
+          AppLogger.d("[Polling] 💡 Cek: device & PC di WiFi yang sama? Server jalan di 192.168.99.46:8700?");
+        }
+        if (_pollingErrorCount == _maxPollingErrorLog) {
+          AppLogger.d("[Polling] 🔕 Error log disuppress — server tidak reachable. Polling tetap berjalan.");
         }
       }
-    } catch (e, stack) {
-      // Silent fail — server mungkin tidak reachable
-      AppLogger.e("[Polling] check-dummy-payment-status error", e, stack);
     } finally {
       _isPollingPayment = false;
     }
@@ -504,19 +558,25 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   void _initDeepLinks() {
     _appLinks = AppLinks();
     _linkSubscription = _appLinks.uriLinkStream.listen((uri) async {
-      // Log deep link yang diterima (tanpa query params)
-      AppLogger.d("[DeepLink] Received: ${uri.scheme}://${uri.host}${uri.path}");
+      AppLogger.d("[DeepLink] ════════════════════════════════");
+      AppLogger.d("[DeepLink] 📲 Diterima: ${uri.scheme}://${uri.host}${uri.path}");
       if (uri.scheme == _config.deepLinkScheme && uri.host == _config.deepLinkHost) {
         if (uri.path.contains('return') || uri.path.contains('callback')) {
-          // Deep link diterima → pembayaran selesai dari sisi e-wallet
+          AppLogger.d("[DeepLink] ✅ Cocok — pembayaran selesai via deep link");
+          AppLogger.d("[DeepLink] → Stop polling + dispatch paymentCompleted + close tab");
           _stopPaymentStatusPolling();
           _paymentNotified = false;
           _notifyPaymentCompleted();
           if (_browser.isOpened()) await _browser.close();
           _activeKodeBayar = null;
           _lastCustomTabUrl = null;
+        } else {
+          AppLogger.d("[DeepLink] ⚠️ Path '${uri.path}' tidak mengandung 'return'/'callback' — diabaikan");
         }
+      } else {
+        AppLogger.d("[DeepLink] ⚠️ Scheme/host tidak cocok (expected ${_config.deepLinkScheme}://${_config.deepLinkHost}) — diabaikan");
       }
+      AppLogger.d("[DeepLink] ════════════════════════════════");
     });
   }
 
@@ -615,9 +675,17 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   Future<void> _openInCustomTabs(String rawUrl) async {
     final uri = Uri.tryParse(rawUrl.trim());
-    if (uri == null) return;
+    if (uri == null) {
+      AppLogger.d("[CustomTab] ❌ URL tidak valid — batal buka Custom Tab");
+      return;
+    }
+    AppLogger.d("[CustomTab] ════════════════════════════════");
+    AppLogger.d("[CustomTab] 🌐 Membuka Custom Tab");
+    AppLogger.d("[CustomTab] host : ${uri.host}");
+    AppLogger.d("[CustomTab] path : ${uri.path}");
     try {
       if (!uri.scheme.startsWith('http')) {
+        AppLogger.d("[CustomTab] scheme non-http ('${uri.scheme}') → launchUrl external");
         await launchUrl(uri, mode: LaunchMode.externalApplication);
         return;
       }
@@ -629,12 +697,11 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
           noHistory: false,
         ),
       );
-      AppLogger.d('[Nav] Custom Tab opened — polling payment status');
-
-      // Mulai polling status pembayaran setelah Custom Tab terbuka
+      AppLogger.d("[CustomTab] ✅ Custom Tab berhasil dibuka");
+      AppLogger.d("[CustomTab] ════════════════════════════════");
       _startPaymentStatusPolling();
     } catch (e, stack) {
-      AppLogger.e("Custom Tab error", e, stack);
+      AppLogger.e("[CustomTab] ❌ Gagal buka Custom Tab — fallback ke launchUrl", e, stack);
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     }
   }
@@ -660,3 +727,4 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     _openInCustomTabs(url);
   }
 }
+
