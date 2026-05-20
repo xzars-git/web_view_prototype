@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:app_links/app_links.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
@@ -92,6 +92,24 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   /// Di-set true saat notify dipanggil, auto-reset setelah 3 detik.
   bool _paymentNotified = false;
 
+  /// URL terakhir Custom Tab yang dibuka — digunakan untuk reopen setelah paymentHold.
+  String? _lastCustomTabUrl;
+
+  /// Kode bayar aktif saat ini — diset dari console message finpay_navigation.
+  String? _activeKodeBayar;
+
+  /// Timer polling status pembayaran via API.
+  Timer? _paymentStatusPoller;
+
+  /// Flag untuk mencegah polling concurrent.
+  bool _isPollingPayment = false;
+
+  /// BuildContext untuk menampilkan dialog — di-set dari page.
+  BuildContext? _dialogContext;
+
+  /// Setter untuk dialog context, dipanggil dari presentation layer.
+  set dialogContext(BuildContext? ctx) => _dialogContext = ctx;
+
   set webViewController(InAppWebViewController? controller) {
     _webViewController = controller;
     if (_webViewController != null) {
@@ -102,17 +120,15 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   late AppLinks _appLinks;
   StreamSubscription<Uri>? _linkSubscription;
   late final ChromeSafariBrowser _browser;
-  Timer? _demoAutoCloseTimer;
 
   void _initBrowser([ChromeSafariBrowser? browser]) {
     _browser = browser ?? _PaymentChromeBrowser(
       onClosedCallback: () {
-        // Production: user tutup Custom Tab manual → beritahu PKB cek status.
-        // PKB yang mengontrol navigasi setelah menerima event ini.
-        AppLogger.d("[Browser] Closed manually by user");
-        Future.delayed(const Duration(milliseconds: 500), () {
-          _notifyPaymentCompleted();
-        });
+        // User tutup Custom Tab → tampilkan dialog konfirmasi pembatalan.
+        // Jangan langsung notify paymentCompleted; biarkan user memilih.
+        AppLogger.d("[Browser] Custom Tab closed by user — showing hold dialog");
+        _stopPaymentStatusPolling();
+        _showPaymentHoldDialog();
       },
     );
   }
@@ -178,6 +194,15 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     Future.delayed(const Duration(seconds: 3), () => _paymentNotified = false);
   }
 
+  /// Dispatch event 'paymentHold' ke PKB WebView.
+  /// Menginformasikan bahwa user menutup Custom Tab tanpa menyelesaikan pembayaran.
+  void _notifyPaymentHold() {
+    AppLogger.d("[Payment] Dispatching 'paymentHold' event to PKB");
+    _webViewController?.evaluateJavascript(
+      source: "window.dispatchEvent(new CustomEvent('paymentHold', {detail:{ts:Date.now(), kodeBayar:'${_activeKodeBayar ?? ''}'}}));",
+    );
+  }
+
   /// Sanitasi URL untuk logging — hanya tampilkan scheme://host/path,
   /// query params dihilangkan untuk mencegah token/session bocor ke log.
   String _sanitizeUrl(String url) {
@@ -190,6 +215,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     AppLogger.d("[Bridge] Setting up JavaScript handlers...");
 
     // SapawargaChannel: terima URL e-wallet → buka di Custom Tab
+    // Tetap dipertahankan sebagai fallback bridge tradisional
     _webViewController?.addJavaScriptHandler(
       handlerName: _config.bridgeName,
       callback: (args) {
@@ -197,29 +223,15 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
         _processIncomingMessage(args[0]);
       },
     );
-
-    // PaymentInfoChannel: terima kodeBayar dari PKB → trigger dummy payment
-    _webViewController?.addJavaScriptHandler(
-      handlerName: _config.paymentInfoBridgeName,
-      callback: (args) {
-        if (args.isEmpty) return;
-        final kodeBayar = args[0].toString().trim();
-        if (kodeBayar.isEmpty) {
-          AppLogger.d('[PaymentInfo] Received empty kodeBayar — skip');
-          return;
-        }
-        AppLogger.d('[PaymentInfo] kodeBayar received: $kodeBayar');
-        _forceDummyPayment(kodeBayar);
-      },
-    );
   }
 
-  /// Membuat UserScript untuk satu bridge channel.
-  UserScript _makeBridgeScript(String bridgeName) => UserScript(
-    groupName: '${bridgeName.toLowerCase()}_bridge',
+  /// UserScript untuk SapawargaChannel (e-wallet → Custom Tab).
+  /// Dipertahankan sebagai fallback — primary handler sekarang via console.log.
+  UserScript get bridgeUserScript => UserScript(
+    groupName: '${_config.bridgeName.toLowerCase()}_bridge',
     source: """
       (function() {
-        var name = '$bridgeName';
+        var name = '${_config.bridgeName}';
         window[name] = {
           postMessage: function(message) {
             console.log('[Bridge] ' + name + '.postMessage called with: ' + message);
@@ -240,48 +252,253 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
   );
 
-  /// UserScript untuk SapawargaChannel (e-wallet → Custom Tab).
-  UserScript get bridgeUserScript => _makeBridgeScript(_config.bridgeName);
-
-  /// UserScript untuk PaymentInfoChannel (kodeBayar → Host App).
-  UserScript get paymentInfoBridgeScript => _makeBridgeScript(_config.paymentInfoBridgeName);
-
   void addDebugLog(String message) => AppLogger.d(message);
 
-  /// POST ke dummy payment server dengan kodeBayar yang diterima dari PKB.
-  /// Setelah berhasil (success == true), dispatch 'paymentCompleted' ke WebView.
-  /// Error ditangani secara silent — tidak crash jika server tidak reachable.
-  Future<void> _forceDummyPayment(String kodeBayar) async {
-    AppLogger.d('[Payment] _forceDummyPayment() called — kodeBayar: $kodeBayar');
-    try {
-      final url = Uri.parse('http://192.168.99.46:8700/api/force-dummy-payment');
-      AppLogger.d('[Payment] POST $url');
+  // ── CONSOLE MESSAGE HANDLER ──────────────────────────────────────────────
+  // Primary handler: intercept console.log JSON dari WebView PKB.
+  // Format yang diharapkan:
+  // {
+  //   "type": "finpay_navigation",
+  //   "url": "https://...",
+  //   "kodeBayar": "3222002005265231"
+  // }
+  // ────────────────────────────────────────────────────────────────────────
 
+  /// Dipanggil dari onConsoleMessage di presentation layer.
+  /// Mendeteksi JSON finpay_navigation dan memproses pembukaan Custom Tab.
+  void handleConsoleMessage(String message) {
+    // Log semua console message ke debug tracker
+    AppLogger.d("[JS] $message");
+
+    // Coba parse sebagai JSON finpay_navigation
+    if (!message.contains('finpay_navigation')) return;
+
+    try {
+      final Map<String, dynamic> json = jsonDecode(message);
+      if (json['type'] != 'finpay_navigation') return;
+
+      final String? url = json['url']?.toString().trim();
+      final String? kodeBayar = json['kodeBayar']?.toString().trim();
+
+      if (url == null || url.isEmpty) {
+        AppLogger.d("[Console] finpay_navigation received but URL is empty");
+        return;
+      }
+
+      AppLogger.d("[Console] finpay_navigation detected");
+      AppLogger.d("[Console] URL: ${_sanitizeUrl(url)}");
+      AppLogger.d("[Console] kodeBayar: ${kodeBayar ?? 'null'}");
+
+      // Simpan kodeBayar untuk polling status
+      _activeKodeBayar = kodeBayar;
+
+      // Validasi URL: hanya https://
+      final uri = Uri.tryParse(url);
+      if (uri == null || uri.scheme != 'https') {
+        AppLogger.d("[Console] Rejected: non-HTTPS URL");
+        return;
+      }
+
+      // Simpan URL untuk kemungkinan reopen setelah paymentHold
+      _lastCustomTabUrl = url;
+
+      // Buka Custom Tab + mulai polling status
+      _webViewController?.stopLoading();
+      _openInCustomTabs(url);
+
+    } catch (e) {
+      // Bukan JSON valid atau bukan finpay_navigation — abaikan
+    }
+  }
+
+  // ── PAYMENT STATUS POLLING ───────────────────────────────────────────────
+  // Polling API check-dummy-payment-status setiap 3 detik.
+  // Jika status true → close Custom Tab otomatis + notify PKB.
+  // ────────────────────────────────────────────────────────────────────────
+
+  void _startPaymentStatusPolling() {
+    if (_activeKodeBayar == null || _activeKodeBayar!.isEmpty) {
+      AppLogger.d("[Polling] No active kodeBayar — skip polling");
+      return;
+    }
+
+    _stopPaymentStatusPolling();
+    AppLogger.d("[Polling] Started — kodeBayar: $_activeKodeBayar (interval: 3s)");
+
+    _paymentStatusPoller = Timer.periodic(const Duration(seconds: 3), (_) {
+      _checkPaymentStatus();
+    });
+  }
+
+  void _stopPaymentStatusPolling() {
+    _paymentStatusPoller?.cancel();
+    _paymentStatusPoller = null;
+    _isPollingPayment = false;
+  }
+
+  Future<void> _checkPaymentStatus() async {
+    if (_isPollingPayment) return; // guard concurrent
+    if (_activeKodeBayar == null) {
+      _stopPaymentStatusPolling();
+      return;
+    }
+
+    _isPollingPayment = true;
+    try {
+      final url = Uri.parse('http://192.168.99.46:8700/api/check-dummy-payment-status');
       final response = await http.post(
         url,
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'kodeBayar': kodeBayar}),
+        body: jsonEncode({'kodeBayar': _activeKodeBayar}),
       );
-
-      AppLogger.d('[Payment] Response status: ${response.statusCode}');
-      AppLogger.d('[Payment] Response body: ${response.body}');
 
       if (response.statusCode == 200) {
         final Map<String, dynamic> body = jsonDecode(response.body);
-        final bool success = body['success'] == true;
-        if (success) {
-          AppLogger.d('[Payment] Force dummy payment SUCCESS — notifying PKB');
+        // Cek apakah status pembayaran sudah true
+        final bool isPaid = body['data']?['status'] == true ||
+                            body['data']?['is_paid'] == true ||
+                            body['success'] == true && body['data']?['status_payment'] == true;
+
+        if (isPaid) {
+          AppLogger.d("[Polling] Payment status: PAID ✅ — closing Custom Tab");
+          _stopPaymentStatusPolling();
+
+          // Reset flag agar bisa dispatch
+          _paymentNotified = false;
           _notifyPaymentCompleted();
-        } else {
-          AppLogger.d('[Payment] Force dummy payment returned success=false: ${body["message"]}');
+
+          // Tutup Custom Tab otomatis
+          if (_browser.isOpened()) {
+            await _browser.close();
+          }
+
+          // Bersihkan state
+          _activeKodeBayar = null;
+          _lastCustomTabUrl = null;
+          return;
         }
-      } else {
-        AppLogger.d('[Payment] Unexpected HTTP status: ${response.statusCode}');
       }
     } catch (e, stack) {
-      // Silent fail — server dummy mungkin tidak aktif di prod environment
-      AppLogger.e('[Payment] _forceDummyPayment error (server unreachable?)', e, stack);
+      // Silent fail — server mungkin tidak reachable
+      AppLogger.e("[Polling] check-dummy-payment-status error", e, stack);
+    } finally {
+      _isPollingPayment = false;
     }
+  }
+
+  // ── PAYMENT HOLD DIALOG ──────────────────────────────────────────────────
+  // Ditampilkan saat user menutup Custom Tab.
+  // Opsi: "Batal" (reopen Custom Tab) atau "Batalkan Transaksi" (kirim paymentHold).
+  // ────────────────────────────────────────────────────────────────────────
+
+  void _showPaymentHoldDialog() {
+    final ctx = _dialogContext;
+    if (ctx == null || !ctx.mounted) {
+      AppLogger.d("[Dialog] No valid context — sending paymentHold directly");
+      _notifyPaymentHold();
+      return;
+    }
+
+    showDialog(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (dialogCtx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Konfirmasi Pembatalan Transaksi',
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF1B5E20),
+          ),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Info kode bayar
+            if (_activeKodeBayar != null && _activeKodeBayar!.isNotEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey[100],
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.grey[300]!),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Kode Bayar',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _activeKodeBayar!,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 16),
+            const Text(
+              'Anda menutup halaman pembayaran. Apakah Anda ingin membatalkan transaksi ini atau melanjutkan pembayaran?',
+              style: TextStyle(fontSize: 14),
+            ),
+          ],
+        ),
+        actions: [
+          // Tombol "Batal" → reopen Custom Tab
+          TextButton(
+            onPressed: () {
+              Navigator.of(dialogCtx).pop();
+              _reopenCustomTab();
+            },
+            child: const Text(
+              'Lanjutkan Bayar',
+              style: TextStyle(
+                color: Color(0xFF1B5E20),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          // Tombol "Batalkan Transaksi" → kirim paymentHold event
+          ElevatedButton(
+            onPressed: () {
+              Navigator.of(dialogCtx).pop();
+              AppLogger.d("[Payment] User confirmed cancellation — sending paymentHold");
+              _notifyPaymentHold();
+              // Bersihkan state pembayaran
+              _activeKodeBayar = null;
+              _lastCustomTabUrl = null;
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red[700],
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            child: const Text('Batalkan Transaksi'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Membuka kembali Custom Tab dengan URL terakhir.
+  /// Dipanggil saat user memilih "Batal" di dialog paymentHold.
+  void _reopenCustomTab() {
+    if (_lastCustomTabUrl == null || _lastCustomTabUrl!.isEmpty) {
+      AppLogger.d("[Payment] No stored URL to reopen Custom Tab");
+      return;
+    }
+    AppLogger.d("[Payment] Reopening Custom Tab: ${_sanitizeUrl(_lastCustomTabUrl!)}");
+    _openInCustomTabs(_lastCustomTabUrl!);
   }
 
   void _initDeepLinks() {
@@ -291,67 +508,24 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       AppLogger.d("[DeepLink] Received: ${uri.scheme}://${uri.host}${uri.path}");
       if (uri.scheme == _config.deepLinkScheme && uri.host == _config.deepLinkHost) {
         if (uri.path.contains('return') || uri.path.contains('callback')) {
-          // URUTAN PENTING: notify DULU sebelum close browser,
-          // agar onClosed() callback tidak re-fire (flag sudah true).
+          // Deep link diterima → pembayaran selesai dari sisi e-wallet
+          _stopPaymentStatusPolling();
+          _paymentNotified = false;
           _notifyPaymentCompleted();
           if (_browser.isOpened()) await _browser.close();
+          _activeKodeBayar = null;
+          _lastCustomTabUrl = null;
         }
-      }
-    });
-  }
-
-  void _startDemoAutoClose() {
-    _demoAutoCloseTimer?.cancel();
-    _demoAutoCloseTimer = Timer(const Duration(seconds: 7), () async {
-      if (_browser.isOpened()) {
-        AppLogger.d('[Sim] Auto-triggering E-Wallet success after 7s');
-        _paymentNotified = false;
-        _notifyPaymentCompleted();
-        await _browser.close();
       }
     });
   }
 
   @override
   void dispose() {
-    _demoAutoCloseTimer?.cancel();
+    _stopPaymentStatusPolling();
     _linkSubscription?.cancel();
     super.dispose();
   }
-
-  // ── SIMULASI (hanya untuk testing/demo) ───────────────────────────────────
-  // Tombol simulasi mereproduksi urutan PERSIS yang terjadi di production:
-  //   1. _notifyPaymentCompleted() → dispatch event ke PKB
-  //   2. _browser.close() → tutup Custom Tab (jika terbuka)
-  // HAPUS blok ini di production build.
-  // ─────────────────────────────────────────────────────────────────────────
-
-  /// [SIM] Jalur A: CC/VA — Finpay redirect ke halaman result.
-  /// Production: handleNavigation deteksi result URL → _notifyPaymentCompleted().
-  Future<void> simulatePaymentCompleted() async {
-    AppLogger.d('[Sim] 💳 CC/VA — dispatch paymentCompleted');
-    _paymentNotified = false;
-    _notifyPaymentCompleted();  // ← sama persis dengan production
-  }
-
-  /// [SIM] Jalur B (manual close): User tutup Custom Tab e-wallet.
-  /// Production: onClosed() → _notifyPaymentCompleted().
-  Future<void> simulateCustomTabClose() async {
-    AppLogger.d('[Sim] 📱 E-Wallet manual close — notify + close tab');
-    _paymentNotified = false;
-    _notifyPaymentCompleted();                        // ← production step 1
-    if (_browser.isOpened()) await _browser.close();   // ← production step 2
-  }
-
-  /// [SIM] Jalur B (deep link): Finpay kirim pocapp://payment/return.
-  /// Production: _initDeepLinks listener → _notifyPaymentCompleted() → close.
-  Future<void> simulateDeepLink() async {
-    AppLogger.d('[Sim] 🔗 Deep link pocapp://payment/return — notify + close tab');
-    _paymentNotified = false;
-    _notifyPaymentCompleted();                        // ← production step 1
-    if (_browser.isOpened()) await _browser.close();   // ← production step 2
-  }
-  // ─────────────────────────────────────────────────────────────────────────
 
   String get effectiveWebViewUrl => _config.targetUrl;
   bool get isRequestingPermissions => value.permissionState == StartupPermissionState.requesting;
@@ -411,17 +585,16 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     switch (decision) {
       case NavigationHandling.allowWebView:
         // Deteksi halaman hasil Finpay (CC/VA) → notifikasi ke PKB.
-        // Sesuai spec bagian 2: handleNavigation deteksi result URL.
         if (_config.isPaymentResultUrl(rawUrl)) {
           AppLogger.d('[Nav] Payment result URL detected — notifying PKB');
+          _stopPaymentStatusPolling();
+          _paymentNotified = false;
           _notifyPaymentCompleted();
         }
         return NavigationActionPolicy.ALLOW;
         
       case NavigationHandling.openInCustomTab:
-        // Jangan buka Custom Tab baru jika:
-        // (a) Custom Tab sudah terbuka — mencegah loop reopen
-        // (b) Payment baru saja di-notify — PKB navigasi balik setelah event diterima
+        // Jangan buka Custom Tab baru jika sudah terbuka atau baru saja di-notify
         if (!_browser.isOpened() && !_paymentNotified) {
           _openInCustomTabs(rawUrl);
         } else {
@@ -456,8 +629,10 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
           noHistory: false,
         ),
       );
-      AppLogger.d('[Nav] Custom Tab opened — waiting for deep link or manual close');
-      _startDemoAutoClose();
+      AppLogger.d('[Nav] Custom Tab opened — polling payment status');
+
+      // Mulai polling status pembayaran setelah Custom Tab terbuka
+      _startPaymentStatusPolling();
     } catch (e, stack) {
       AppLogger.e("Custom Tab error", e, stack);
       await launchUrl(uri, mode: LaunchMode.externalApplication);
@@ -469,8 +644,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     if (url.isEmpty) return;
 
     // Validasi: hanya terima URL https:// dari bridge.
-    // Semua e-wallet (DANA, ShopeePay, LinkAja) menggunakan HTTPS.
-    // Menolak scheme lain mencegah penyalahgunaan bridge.
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasScheme) {
       AppLogger.d("[Bridge] Rejected: malformed URL from PKB");
@@ -482,6 +655,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     }
 
     AppLogger.d("[Bridge] Opening in Custom Tab: ${_sanitizeUrl(url)}");
+    _lastCustomTabUrl = url;
     _webViewController?.stopLoading();
     _openInCustomTabs(url);
   }

@@ -7,7 +7,6 @@ import '../../../config/logger.dart';
 import '../application/hybrid_webview_controller.dart';
 import 'widgets/debug_tracker_overlay.dart';
 import 'widgets/permission_chip.dart';
-import 'widgets/simulation_toolbar.dart';
 
 
 /// Halaman utama fitur Hybrid WebView.
@@ -55,6 +54,8 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     // Hal ini menjamin konteks UI siap sebelum dialog sistem muncul.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _controller.requestStartupPermissions();
+      // Set dialog context agar controller bisa menampilkan dialog paymentHold
+      _controller.dialogContext = context;
     });
   }
 
@@ -67,6 +68,9 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Update dialog context setiap build (context bisa berubah)
+    _controller.dialogContext = context;
+
     // Mendengarkan perubahan state dari controller secara reaktif menggunakan ValueListenableBuilder.
     return ValueListenableBuilder<HybridWebViewState>(
       valueListenable: _controller,
@@ -146,7 +150,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                               // Menyuntikkan JavaScript Bridge (SapawargaChannel) sebelum dokumen dimuat.
                               initialUserScripts: UnmodifiableListView<UserScript>([
                                 _controller.bridgeUserScript,
-                                _controller.paymentInfoBridgeScript,
                               ]),
                               initialSettings: InAppWebViewSettings(
                                 javaScriptEnabled: true,
@@ -196,8 +199,9 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                                 _controller.updateStatus("HTTP Error ${errorResponse.statusCode}");
                               },
                               onConsoleMessage: (controller, consoleMessage) {
-                                // Menangkap log dari konsol browser dan mengarahkannya ke logger app.
-                                AppLogger.d("[JS] ${consoleMessage.message}");
+                                // PRIMARY HANDLER: intercept console.log dari PKB WebView.
+                                // Deteksi finpay_navigation JSON untuk membuka Custom Tab.
+                                _controller.handleConsoleMessage(consoleMessage.message);
                               },
                               onRenderProcessGone: (controller, detail) {
                                 AppLogger.d("[UI] ⚠️ WebView Crash Detected!");
@@ -224,12 +228,11 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                                 alignment: Alignment.topCenter,
                                 child: LinearProgressIndicator(minHeight: 2),
                               ),
-                          ],
-                        ),
+                        ],
+                      ),
                 ),
-                // Panel Debug: Toolbar simulasi + log tracker.
+                // Panel Debug: log tracker (simulation toolbar dihapus).
                 if (_showDebug) ...[
-                  SimulationToolbar(controller: _controller),
                   ValueListenableBuilder<List<String>>(
                     valueListenable: AppLogger.logsNotifier,
                     builder: (context, logs, _) {

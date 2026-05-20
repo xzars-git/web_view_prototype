@@ -6,7 +6,7 @@ abstract class AppConfig {
   String get currentEnvironment;
   String get targetUrl;
   String get bridgeName;
-  String get paymentInfoBridgeName;
+
   String get deepLinkScheme;
   String get deepLinkHost;
   String get paymentEventName;
@@ -32,8 +32,7 @@ class DefaultAppConfig implements AppConfig {
   String get prodEnv => 'prod';
   @override
   String get bridgeName => 'SapawargaChannel';
-  @override
-  String get paymentInfoBridgeName => 'PaymentInfoChannel';
+
   @override
   String get deepLinkScheme => 'pocapp';
   @override

@@ -1,6 +1,6 @@
 # Panduan Integrasi Host App — PKB WebView Payment
 > **Untuk:** Tim pengembang host app (aplikasi native yang mem-wrap PKB sebagai WebView)
-> **Versi:** 2026-05-11
+> **Versi:** 2026-05-20 (v2 — Console Handler + API Polling + paymentHold)
 > **Kontak PKB:** *(isi nama/email tim PKB)*
 
 ---
@@ -20,7 +20,7 @@ Ketika user memilih metode pembayaran di PKB, ada **2 jalur** yang berbeda:
 | Jalur | Metode | Cara Kerja |
 |-------|--------|------------|
 | **A** | Kartu Kredit, Virtual Account | PKB navigasi langsung di WebView → tetap di InAppWebView |
-| **B** | DANA, ShopeePay, LinkAja | PKB kirim URL ke host app → host buka **Chrome Custom Tab** |
+| **B** | DANA, ShopeePay, LinkAja | PKB kirim JSON via `console.log` → host buka **Chrome Custom Tab** |
 
 ---
 
@@ -38,205 +38,436 @@ Ketika user memilih metode pembayaran di PKB, ada **2 jalur** yang berbeda:
 
 ## Apa yang Harus Kamu Implementasikan
 
-### ✅ Checklist Implementasi (Production)
+### ✅ Checklist Implementasi
 
-- [ ] **Bridge `SapawargaChannel`** — inject ke WebView sebelum PKB load
-- [ ] **Handler terima postMessage** → buka URL di Custom Tab
-- [ ] **`handleNavigation` / `shouldOverrideUrlLoading`** — whitelist domain
-- [ ] **Notifikasi ke PKB** — dispatch event `paymentCompleted` setelah bayar
+- [ ] **Intercept `console.log`** — parse JSON `finpay_navigation` untuk dapatkan URL + kodeBayar
+- [ ] **Buka URL di Custom Tab** — saat `finpay_navigation` terdeteksi
+- [ ] **Polling API status pembayaran** — `POST /api/check-dummy-payment-status` setiap 3 detik
+- [ ] **Auto-close Custom Tab** — saat API return status `true`
+- [ ] **Dialog konfirmasi pembatalan** — muncul saat user tutup Custom Tab manual
+- [ ] **Dispatch `paymentHold`** — saat user konfirmasi batalkan transaksi
+- [ ] **Reopen Custom Tab** — saat user pilih lanjutkan bayar di dialog
+- [ ] **Bridge `SapawargaChannel`** — inject ke WebView sebagai fallback
+- [ ] **`handleNavigation`** — whitelist domain PKB + Finpay
 - [ ] **Deep link `pocapp://`** — daftarkan di AndroidManifest & Info.plist
 
-### ✅ Checklist Tambahan (Demo Mode)
-
-- [ ] **`_demoAutoCloseTimer`** — timer native yang auto-close Custom Tab setelah N detik
-- [ ] **Auto-trigger Jalur A** — timer yang balik ke PKB setelah WebView navigasi ke Finpay
-
 ---
 
-## 1. Bridge JavaScript (SapawargaChannel)
+## 1. Intercept Console Message (PRIMARY — Menerima URL + kodeBayar)
 
-PKB berkomunikasi ke host app menggunakan `window.SapawargaChannel.postMessage(url)`.
-Kamu harus menyuntikkan object ini ke WebView **sebelum** halaman PKB dimuat.
+PKB mengirim instruksi pembayaran e-wallet via `console.log(JSON.stringify({...}))`.
+Host app menangkap via callback `onConsoleMessage`.
 
-**Cara inject (flutter_inappwebview):**
-
-```dart
-// Buat UserScript yang diinjeksi AT_DOCUMENT_START
-UserScript(
-  groupName: 'sapawarga_bridge',
-  source: """
-    (function() {
-      window['SapawargaChannel'] = {
-        postMessage: function(message) {
-          if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-            window.flutter_inappwebview.callHandler('SapawargaChannel', message);
-          } else {
-            window.addEventListener('flutterInAppWebViewPlatformReady', function() {
-              window.flutter_inappwebview.callHandler('SapawargaChannel', message);
-            });
-          }
-        }
-      };
-    })();
-  """,
-  injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-)
-```
-
-**Daftarkan handler Flutter-nya:**
-
-```dart
-webViewController.addJavaScriptHandler(
-  handlerName: 'SapawargaChannel',
-  callback: (args) {
-    if (args.isEmpty) return;
-    final String url = args[0].toString().trim();
-
-    // Validasi: hanya terima URL https://
-    final uri = Uri.tryParse(url);
-    if (uri == null || uri.scheme != 'https') return;
-
-    _openInCustomTab(url); // lihat bagian 3
-  },
-);
-```
-
-> **Catatan:** PKB hanya mengirim URL e-wallet (DANA, ShopeePay, LinkAja) melalui bridge ini. URL CC/VA **tidak** dikirim via bridge — PKB langsung navigasi WebView.
-
----
-
-## 2. Pengaturan Navigasi WebView (shouldOverrideUrlLoading)
-
-Kamu **wajib** mengizinkan domain berikut di dalam WebView:
-
-```dart
-// Domain yang harus di-ALLOW di WebView:
-// - Domain PKB kamu sendiri (misal: sambara.vercel.app)
-// - live.finpay.id (halaman pembayaran CC/VA)
-final List<String> allowedHosts = [
-  'sambara.vercel.app',   // ganti dengan domain PKB production
-  'live.finpay.id',       // halaman Finpay CC/VA
-];
-
-Future<NavigationActionPolicy> handleNavigation(NavigationAction action) async {
-  final uri = action.request.url;
-  if (uri == null) return NavigationActionPolicy.ALLOW;
-
-  // 1. Non-http (pocapp://, dll.) → handle external
-  if (!uri.scheme.startsWith('http')) {
-    launchUrl(uri, mode: LaunchMode.externalApplication);
-    return NavigationActionPolicy.CANCEL;
-  }
-
-  // 2. Deteksi halaman hasil pembayaran CC/VA
-  //    Finpay redirect ke live.finpay.id/pg/payment/card/result/{success|failed}
-  //    Trigger notifikasi ke PKB agar langsung verifikasi
-  final path = uri.path.toLowerCase();
-  if (path.contains('/payment/card/result/') ||
-      path.contains('/payment/result/') ||
-      path.contains('/payment/success') ||
-      path.contains('/payment/failed')) {
-    _notifyPaymentCompleted(); // lihat bagian 4
-    return NavigationActionPolicy.ALLOW; // tetap tampilkan halaman hasil
-  }
-
-  // 3. Domain whitelist → ALLOW
-  final host = uri.host.toLowerCase();
-  if (allowedHosts.any((h) => host == h || host.endsWith('.$h'))) {
-    return NavigationActionPolicy.ALLOW;
-  }
-
-  // 4. Di luar whitelist → CANCEL
-  return NavigationActionPolicy.CANCEL;
+**Format JSON dari PKB:**
+```json
+{
+    "type": "finpay_navigation",
+    "url": "https://m.dana.id/n/cashier/new/checkout?bizNo=20260520111212800110166257009864415&...",
+    "kodeBayar": "3222002005265231"
 }
 ```
 
-> **PENTING:** Jangan redirect URL `https://` ke Custom Tab! URL CC/VA masuk via `shouldOverrideUrlLoading` dan harus di-ALLOW agar tetap di WebView.
+**Implementasi di Host App (Presentation Layer — onConsoleMessage):**
+
+```dart
+// Di InAppWebView widget:
+onConsoleMessage: (controller, consoleMessage) {
+  // Semua console.log dikirim ke controller untuk diproses
+  _controller.handleConsoleMessage(consoleMessage.message);
+},
+```
+
+**Implementasi di Controller — handleConsoleMessage():**
+
+```dart
+void handleConsoleMessage(String message) {
+  // Log semua console message ke debug tracker
+  AppLogger.d("[JS] $message");
+
+  // Quick-check sebelum JSON parse (optimisasi performa)
+  if (!message.contains('finpay_navigation')) return;
+
+  try {
+    final Map<String, dynamic> json = jsonDecode(message);
+    if (json['type'] != 'finpay_navigation') return;
+
+    final String? url = json['url']?.toString().trim();
+    final String? kodeBayar = json['kodeBayar']?.toString().trim();
+
+    if (url == null || url.isEmpty) {
+      AppLogger.d("[Console] finpay_navigation received but URL is empty");
+      return;
+    }
+
+    AppLogger.d("[Console] finpay_navigation detected");
+    AppLogger.d("[Console] URL: ${_sanitizeUrl(url)}");
+    AppLogger.d("[Console] kodeBayar: ${kodeBayar ?? 'null'}");
+
+    // Simpan kodeBayar untuk polling status
+    _activeKodeBayar = kodeBayar;
+
+    // Validasi URL: hanya https://
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.scheme != 'https') {
+      AppLogger.d("[Console] Rejected: non-HTTPS URL");
+      return;
+    }
+
+    // Simpan URL untuk kemungkinan reopen setelah paymentHold
+    _lastCustomTabUrl = url;
+
+    // Buka Custom Tab + mulai polling status
+    _webViewController?.stopLoading();
+    _openInCustomTabs(url);
+
+  } catch (e) {
+    // Bukan JSON valid atau bukan finpay_navigation — abaikan
+  }
+}
+```
+
+> **Kenapa console.log, bukan postMessage?** Console.log memungkinkan PKB mengirim data **terstruktur** (URL + kodeBayar) dalam satu payload JSON, tanpa perlu bridge tambahan. Host app cukup intercept `onConsoleMessage` yang sudah built-in di `InAppWebView`.
 
 ---
 
-## 3. Buka URL di Chrome Custom Tab
+## 2. Buka URL di Chrome Custom Tab + Start Polling
+
+Setelah `finpay_navigation` terdeteksi, host app membuka URL di Custom Tab **dan** mulai polling status pembayaran.
 
 ```dart
 late final ChromeSafariBrowser _browser = _PaymentChromeBrowser(
   onClosedCallback: () {
-    // User tutup Custom Tab → beritahu PKB untuk cek status
-    _notifyPaymentCompleted();
+    // User tutup Custom Tab → tampilkan dialog konfirmasi pembatalan
+    AppLogger.d("[Browser] Custom Tab closed by user — showing hold dialog");
+    _stopPaymentStatusPolling();
+    _showPaymentHoldDialog();
   },
 );
 
-Future<void> _openInCustomTab(String url) async {
-  final uri = Uri.tryParse(url);
+Future<void> _openInCustomTabs(String rawUrl) async {
+  final uri = Uri.tryParse(rawUrl.trim());
   if (uri == null) return;
   try {
+    if (!uri.scheme.startsWith('http')) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      return;
+    }
     await _browser.open(
       url: WebUri.uri(uri),
       settings: ChromeSafariBrowserSettings(
         shareState: CustomTabsShareState.SHARE_STATE_OFF,
         showTitle: true,
+        noHistory: false,
       ),
     );
-  } catch (e) {
-    // Fallback jika Custom Tab gagal
+    AppLogger.d('[Nav] Custom Tab opened — polling payment status');
+
+    // Mulai polling status pembayaran setelah Custom Tab terbuka
+    _startPaymentStatusPolling();
+  } catch (e, stack) {
+    AppLogger.e("Custom Tab error", e, stack);
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 }
 
-// ChromeSafariBrowser wrapper
+// ChromeSafariBrowser wrapper — callback saat user tutup Custom Tab
 class _PaymentChromeBrowser extends ChromeSafariBrowser {
   _PaymentChromeBrowser({required this.onClosedCallback});
   final VoidCallback onClosedCallback;
-
   @override
   void onClosed() => onClosedCallback();
 }
 ```
 
+> **PENTING:** Saat `onClosed()` dipanggil (user tutup Custom Tab), host app **TIDAK** langsung dispatch `paymentCompleted`. Sebagai gantinya, tampilkan **dialog konfirmasi** agar user bisa memilih: lanjutkan bayar atau batalkan transaksi.
+
 ---
 
-## 4. Notifikasi ke PKB (paymentCompleted Event)
+## 3. Polling API Status Pembayaran
 
-Setelah pembayaran selesai (dari jalur manapun), kamu **wajib** mengirim event ini ke PKB:
+Host app melakukan polling setiap 3 detik ke endpoint dummy payment server. Jika status pembayaran sudah `true`, Custom Tab ditutup otomatis dan event `paymentCompleted` di-dispatch ke PKB.
+
+**Endpoint:**
+```
+POST http://192.168.99.46:8700/api/check-dummy-payment-status
+Content-Type: application/json
+
+{
+    "kodeBayar": "3222002005265231"
+}
+```
+
+**Implementasi:**
 
 ```dart
-// Simpan referensi webViewController
-InAppWebViewController? _webViewController;
+/// Timer polling status pembayaran via API.
+Timer? _paymentStatusPoller;
 
-void _notifyPaymentCompleted() {
+/// Flag untuk mencegah polling concurrent.
+bool _isPollingPayment = false;
+
+/// Kode bayar aktif saat ini — diset dari console message finpay_navigation.
+String? _activeKodeBayar;
+
+void _startPaymentStatusPolling() {
+  if (_activeKodeBayar == null || _activeKodeBayar!.isEmpty) {
+    AppLogger.d("[Polling] No active kodeBayar — skip polling");
+    return;
+  }
+
+  _stopPaymentStatusPolling();
+  AppLogger.d("[Polling] Started — kodeBayar: $_activeKodeBayar (interval: 3s)");
+
+  _paymentStatusPoller = Timer.periodic(const Duration(seconds: 3), (_) {
+    _checkPaymentStatus();
+  });
+}
+
+void _stopPaymentStatusPolling() {
+  _paymentStatusPoller?.cancel();
+  _paymentStatusPoller = null;
+  _isPollingPayment = false;
+}
+
+Future<void> _checkPaymentStatus() async {
+  if (_isPollingPayment) return; // guard concurrent
+  if (_activeKodeBayar == null) {
+    _stopPaymentStatusPolling();
+    return;
+  }
+
+  _isPollingPayment = true;
+  try {
+    final url = Uri.parse('http://192.168.99.46:8700/api/check-dummy-payment-status');
+    final response = await http.post(
+      url,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'kodeBayar': _activeKodeBayar}),
+    );
+
+    if (response.statusCode == 200) {
+      final Map<String, dynamic> body = jsonDecode(response.body);
+      // Cek apakah status pembayaran sudah true
+      final bool isPaid = body['data']?['status'] == true ||
+                          body['data']?['is_paid'] == true ||
+                          body['success'] == true && body['data']?['status_payment'] == true;
+
+      if (isPaid) {
+        AppLogger.d("[Polling] Payment status: PAID ✅ — closing Custom Tab");
+        _stopPaymentStatusPolling();
+
+        // Reset flag agar bisa dispatch
+        _paymentNotified = false;
+        _notifyPaymentCompleted();
+
+        // Tutup Custom Tab otomatis
+        if (_browser.isOpened()) {
+          await _browser.close();
+        }
+
+        // Bersihkan state
+        _activeKodeBayar = null;
+        _lastCustomTabUrl = null;
+        return;
+      }
+    }
+  } catch (e, stack) {
+    // Silent fail — server mungkin tidak reachable
+    AppLogger.e("[Polling] check-dummy-payment-status error", e, stack);
+  } finally {
+    _isPollingPayment = false;
+  }
+}
+```
+
+**Kapan polling berhenti:**
+
+| Kondisi | Action |
+|---------|--------|
+| API return `isPaid = true` | `_stopPaymentStatusPolling()` + close Custom Tab + dispatch `paymentCompleted` |
+| User tutup Custom Tab manual | `_stopPaymentStatusPolling()` + tampilkan dialog |
+| Deep link `pocapp://` diterima | `_stopPaymentStatusPolling()` + dispatch `paymentCompleted` |
+| Controller di-dispose | `_stopPaymentStatusPolling()` via `dispose()` |
+
+---
+
+## 4. Dialog Konfirmasi & Event paymentHold
+
+Saat user menutup Custom Tab secara manual, muncul dialog konfirmasi dengan 2 opsi:
+
+**Dialog UI:**
+
+```
+┌──────────────────────────────────────────────┐
+│  Konfirmasi Pembatalan Transaksi             │
+│                                              │
+│  ┌────────────────────────────────────────┐  │
+│  │ Kode Bayar                             │  │
+│  │ 3222002005265231                       │  │
+│  └────────────────────────────────────────┘  │
+│                                              │
+│  Anda menutup halaman pembayaran.            │
+│  Apakah Anda ingin membatalkan transaksi     │
+│  ini atau melanjutkan pembayaran?             │
+│                                              │
+│        [Lanjutkan Bayar]  [Batalkan Transaksi]│
+└──────────────────────────────────────────────┘
+```
+
+**Implementasi — Dispatch paymentHold:**
+
+```dart
+/// Dispatch event 'paymentHold' ke PKB WebView.
+/// Menginformasikan bahwa user menutup Custom Tab tanpa menyelesaikan pembayaran.
+void _notifyPaymentHold() {
+  AppLogger.d("[Payment] Dispatching 'paymentHold' event to PKB");
   _webViewController?.evaluateJavascript(
-    source: "window.dispatchEvent(new CustomEvent('paymentCompleted', {detail:{ts:Date.now()}}));",
+    source: "window.dispatchEvent(new CustomEvent('paymentHold', "
+            "{detail:{ts:Date.now(), kodeBayar:'${_activeKodeBayar ?? ''}'}}));",
   );
+}
+```
+
+**Event yang diterima PKB:**
+```javascript
+window.addEventListener('paymentHold', function(event) {
+    console.log('kodeBayar:', event.detail.kodeBayar);
+    console.log('timestamp:', event.detail.ts);
+    // PKB menghit API pembatalan dari sisinya
+});
+```
+
+**Implementasi — Dialog + Reopen:**
+
+```dart
+void _showPaymentHoldDialog() {
+  final ctx = _dialogContext;
+  if (ctx == null || !ctx.mounted) {
+    _notifyPaymentHold();
+    return;
+  }
+
+  showDialog(
+    context: ctx,
+    barrierDismissible: false,
+    builder: (dialogCtx) => AlertDialog(
+      // ... UI dialog ...
+      actions: [
+        // Tombol "Lanjutkan Bayar" → reopen Custom Tab
+        TextButton(
+          onPressed: () {
+            Navigator.of(dialogCtx).pop();
+            _reopenCustomTab(); // buka kembali Custom Tab + restart polling
+          },
+          child: const Text('Lanjutkan Bayar'),
+        ),
+        // Tombol "Batalkan Transaksi" → kirim paymentHold event
+        ElevatedButton(
+          onPressed: () {
+            Navigator.of(dialogCtx).pop();
+            _notifyPaymentHold();        // dispatch event ke PKB
+            _activeKodeBayar = null;     // bersihkan state
+            _lastCustomTabUrl = null;
+          },
+          child: const Text('Batalkan Transaksi'),
+        ),
+      ],
+    ),
+  );
+}
+
+/// Membuka kembali Custom Tab dengan URL terakhir.
+void _reopenCustomTab() {
+  if (_lastCustomTabUrl == null || _lastCustomTabUrl!.isEmpty) {
+    AppLogger.d("[Payment] No stored URL to reopen Custom Tab");
+    return;
+  }
+  AppLogger.d("[Payment] Reopening Custom Tab: ${_sanitizeUrl(_lastCustomTabUrl!)}");
+  _openInCustomTabs(_lastCustomTabUrl!);
+  // _openInCustomTabs akan otomatis memanggil _startPaymentStatusPolling()
+}
+```
+
+---
+
+## 5. Notifikasi ke PKB (paymentCompleted Event)
+
+Event `paymentCompleted` di-dispatch ke PKB **hanya** saat pembayaran benar-benar terdeteksi selesai (bukan saat user tutup Custom Tab manual).
+
+```dart
+void _notifyPaymentCompleted() {
+  if (_paymentNotified) {
+    AppLogger.d("[Payment] Already notified — skipping duplicate dispatch");
+    return;
+  }
+  _paymentNotified = true;
+  AppLogger.d("[Payment] Dispatching 'paymentCompleted' event");
+  _webViewController?.evaluateJavascript(
+    source: "window.dispatchEvent(new CustomEvent('paymentCompleted', "
+            "{detail:{ts:Date.now()}}));",
+  );
+  // Auto-reset flag setelah 3 detik
+  Future.delayed(const Duration(seconds: 3), () => _paymentNotified = false);
 }
 ```
 
 **Event ini dipanggil dari 3 tempat:**
 
-| Situasi | Dipanggil dari |
-|---------|---------------|
-| Finpay redirect ke halaman sukses/gagal (CC/VA) | `handleNavigation` saat deteksi result URL |
-| Deep link `pocapp://payment/return` diterima | `app_links` stream listener |
-| User tutup Custom Tab secara manual (E-wallet) | `ChromeSafariBrowser.onClosed()` |
+| Situasi | Trigger |
+|---------|---------|
+| API polling return `isPaid = true` | `_checkPaymentStatus()` → auto-close Custom Tab |
+| Deep link `pocapp://payment/return` diterima | `_initDeepLinks()` → close Custom Tab |
+| CC/VA result URL terdeteksi di WebView | `handleNavigation()` → Jalur A |
 
-> **PENTING — Urutan untuk deep link:** Panggil `_notifyPaymentCompleted()` **sebelum** menutup browser. Jika dibalik, `onClosed()` akan memicu notifikasi kedua.
->
-> ```dart
-> // ✅ Benar:
-> _notifyPaymentCompleted(); // notify dulu
-> await _browser.close();    // baru close
->
-> // ❌ Salah (double-fire):
-> await _browser.close();    // close dulu → onClosed() fire → notify #1
-> _notifyPaymentCompleted(); // notify #2 → duplicate!
-> ```
+> **PENTING:** Saat user tutup Custom Tab manual, **BUKAN** `paymentCompleted` yang dikirim, melainkan dialog + kemungkinan `paymentHold`.
 
 ---
 
-## 5. Deep Link Setup (pocapp://)
+## 6. Pengaturan Navigasi WebView (shouldOverrideUrlLoading)
 
-Deep link `pocapp://payment/return` dikirim oleh Finpay setelah pembayaran e-wallet selesai.
+Tidak berubah dari versi sebelumnya:
+
+```dart
+Future<NavigationActionPolicy> handleNavigation(NavigationAction action) async {
+  final uri = action.request.url;
+  final rawUrl = uri?.toString() ?? '';
+  if (rawUrl.isEmpty) return NavigationActionPolicy.ALLOW;
+
+  final decision = _navigationGuard.evaluate(rawUrl);
+
+  switch (decision) {
+    case NavigationHandling.allowWebView:
+      // Deteksi halaman hasil Finpay (CC/VA) → notifikasi ke PKB
+      if (_config.isPaymentResultUrl(rawUrl)) {
+        _stopPaymentStatusPolling();
+        _paymentNotified = false;
+        _notifyPaymentCompleted();
+      }
+      return NavigationActionPolicy.ALLOW;
+      
+    case NavigationHandling.openInCustomTab:
+      if (!_browser.isOpened() && !_paymentNotified) {
+        _openInCustomTabs(rawUrl);
+      }
+      return NavigationActionPolicy.CANCEL;
+
+    case NavigationHandling.externalApp:
+      if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
+      return NavigationActionPolicy.CANCEL;
+
+    case NavigationHandling.cancel:
+      return NavigationActionPolicy.CANCEL;
+  }
+}
+```
+
+---
+
+## 7. Deep Link Setup (pocapp://)
+
+Tetap sama — deep link dari Finpay setelah pembayaran e-wallet.
 
 ### Android — `AndroidManifest.xml`
-
 ```xml
 <intent-filter android:autoVerify="true">
     <action android:name="android.intent.action.VIEW" />
@@ -247,7 +478,6 @@ Deep link `pocapp://payment/return` dikirim oleh Finpay setelah pembayaran e-wal
 ```
 
 ### iOS — `Info.plist`
-
 ```xml
 <key>CFBundleURLTypes</key>
 <array>
@@ -260,20 +490,21 @@ Deep link `pocapp://payment/return` dikirim oleh Finpay setelah pembayaran e-wal
 </array>
 ```
 
-### Listener di Dart (package `app_links`)
-
+### Listener di Dart
 ```dart
-import 'package:app_links/app_links.dart';
-
-final _appLinks = AppLinks();
-
 void _initDeepLinks() {
-  _appLinks.uriLinkStream.listen((uri) async {
-    if (uri.scheme == 'pocapp' && uri.host == 'payment') {
+  _appLinks = AppLinks();
+  _linkSubscription = _appLinks.uriLinkStream.listen((uri) async {
+    AppLogger.d("[DeepLink] Received: ${uri.scheme}://${uri.host}${uri.path}");
+    if (uri.scheme == _config.deepLinkScheme && uri.host == _config.deepLinkHost) {
       if (uri.path.contains('return') || uri.path.contains('callback')) {
-        // Notify DULU, baru close browser
+        // Deep link = pembayaran selesai
+        _stopPaymentStatusPolling();
+        _paymentNotified = false;
         _notifyPaymentCompleted();
         if (_browser.isOpened()) await _browser.close();
+        _activeKodeBayar = null;
+        _lastCustomTabUrl = null;
       }
     }
   });
@@ -282,7 +513,7 @@ void _initDeepLinks() {
 
 ---
 
-## 6. Alur Lengkap Per Jalur
+## 8. Alur Lengkap Per Jalur
 
 ### Jalur A — Kartu Kredit / Virtual Account
 
@@ -298,147 +529,48 @@ void _initDeepLinks() {
 ### Jalur B — E-Wallet (DANA, ShopeePay, LinkAja)
 
 ```
-[PKB]  User pilih DANA → PKB kirim URL ke bridge: SapawargaChannel.postMessage(url)
-[Host] Handler terima URL → validasi https:// → buka Custom Tab
-[Host] User bayar di DANA app
-       Skenario 1 — Deep link:
+[PKB]  User pilih DANA → PKB kirim via console.log:
+       { "type":"finpay_navigation", "url":"https://...", "kodeBayar":"..." }
+[Host] onConsoleMessage → handleConsoleMessage() → parse JSON
+[Host] _openInCustomTabs(url) + _startPaymentStatusPolling(kodeBayar)
+[Host] Custom Tab terbuka → user bayar di DANA app
+
+       Skenario 1 — Pembayaran berhasil (API polling):
+         [Host] _checkPaymentStatus() return isPaid=true
+         [Host] → _notifyPaymentCompleted() → _browser.close()
+         [PKB]  Terima event 'paymentCompleted' → verifikasi → selesai ✅
+
+       Skenario 2 — Deep link:
          Finpay kirim pocapp://payment/return
-         [Host] app_links terima → _notifyPaymentCompleted() → close browser
-       Skenario 2 — Manual close:
-         User tutup Custom Tab
-         [Host] onClosed() → _notifyPaymentCompleted()
-[PKB]  Terima event 'paymentCompleted' → panggil API cek status → selesai
+         [Host] _initDeepLinks → _notifyPaymentCompleted() → close browser
+         [PKB]  Terima event 'paymentCompleted' → selesai ✅
+
+       Skenario 3 — User tutup Custom Tab manual:
+         [Host] onClosed() → _stopPaymentStatusPolling()
+         [Host] _showPaymentHoldDialog()
+         
+         User pilih "Lanjutkan Bayar":
+           [Host] _reopenCustomTab() → buka URL yang sama + restart polling
+           → Kembali ke Skenario 1/2
+         
+         User pilih "Batalkan Transaksi":
+           [Host] _notifyPaymentHold() → dispatch event ke PKB
+           [PKB]  Terima event 'paymentHold' → hit API pembatalan
 ```
 
 ---
 
-## 7. Troubleshooting
+## 9. Troubleshooting
 
 | Gejala | Kemungkinan Penyebab | Solusi |
 |--------|---------------------|--------|
 | Halaman Finpay CC/VA tidak muncul | Domain `live.finpay.id` tidak di whitelist | Tambahkan ke `allowedHosts` |
-| E-wallet tidak terbuka (stuck di WebView) | Bridge `SapawargaChannel` tidak ter-inject | Pastikan UserScript diinjeksi `AT_DOCUMENT_START` |
-| `paymentCompleted` dipanggil 2x | Urutan notify/close salah | Panggil notify **sebelum** `_browser.close()` |
-| PKB tidak update setelah bayar | Event `paymentCompleted` tidak sampai | Pastikan `evaluateJavascript` dipanggil ke webViewController yang aktif |
+| E-wallet tidak terbuka | Console JSON tidak terdeteksi | Pastikan PKB mengirim format JSON yang benar via `console.log` |
+| `paymentCompleted` tidak terpicu | API polling belum berjalan | Pastikan `kodeBayar` tersedia di JSON |
+| Custom Tab tidak reopen setelah dialog | `_lastCustomTabUrl` null | Pastikan URL disimpan saat pertama kali buka |
 | Deep link tidak tertangkap | AndroidManifest/Info.plist salah | Cek scheme `pocapp` dan host `payment` |
-| Demo timer tidak jalan | `_startDemoAutoClose` tidak dipanggil | Pastikan dipanggil setelah `_browser.open()` dan saat navigasi ke Finpay |
-
----
-
-## 8. Demo Mode — Auto Trigger Tanpa Aksi User
-
-> **Konteks:** Saat Custom Tab terbuka, WebView di-pause Android. Timer/JS di PKB ikut berhenti.
-> Namun **host app TIDAK di-pause** — timer native di sini tetap berjalan.
-> Skema ini memanfaatkan hal tersebut untuk simulasi pembayaran otomatis tanpa perlu user menutup Custom Tab secara manual.
-
-### Cara Kerja
-
-```
-Jalur B (E-Wallet — Custom Tab):
-  _openInCustomTabs() dipanggil
-    → Custom Tab buka URL Finpay
-    → _startDemoAutoClose(isCustomTab: true) dipanggil
-    → Timer 5 detik berjalan di host app (tidak di-pause!)
-    → [5s] Timer fired:
-        → _notifyPaymentCompleted()  ← event dikirim ke PKB
-        → _browser.close()           ← Custom Tab tertutup otomatis
-    → PKB terima event → verifikasi → UI sukses ✅
-
-Jalur A (CC/VA — InAppWebView):
-  handleNavigation() mendeteksi navigasi ke URL Finpay (live.finpay.id)
-    → _startDemoAutoClose(isCustomTab: false) dipanggil
-    → Timer 5 detik berjalan
-    → [5s] Timer fired:
-        → _notifyPaymentCompleted()
-        → reloadBasePage()  ← WebView kembali ke PKB
-    → PKB reload → timer PKB lanjut → mock sukses ✅
-```
-
-### Implementasi
-
-```dart
-// Field yang dibutuhkan di controller:
-static const Duration _demoAutoCloseDelay = Duration(seconds: 5); // sesuaikan
-Timer? _demoAutoCloseTimer;
-
-// Helper:
-void _startDemoAutoClose({bool isCustomTab = false}) {
-  _demoAutoCloseTimer?.cancel();
-  _demoAutoCloseTimer = Timer(_demoAutoCloseDelay, () async {
-    if (isCustomTab) {
-      // Jalur B: notify dulu, baru close (cegah double-fire via onClosed)
-      _notifyPaymentCompleted();
-      if (_browser.isOpened()) await _browser.close();
-    } else {
-      // Jalur A: notify, lalu reload PKB
-      _notifyPaymentCompleted();
-      await reloadBasePage(); // atau loadUrl ke URL PKB production
-    }
-  });
-}
-
-// Panggil setelah Custom Tab berhasil dibuka (Jalur B):
-await _browser.open(url: ..., settings: ...);
-_startDemoAutoClose(isCustomTab: true); // ← tambahkan ini
-
-// Panggil saat WebView navigasi ke Finpay CC/VA (Jalur A):
-// Di dalam handleNavigation(), case allowWebView:
-if (_config.isWebViewNavigationAllowed(rawUrl) && rawUrl.contains('finpay')) {
-  _startDemoAutoClose(isCustomTab: false); // ← tambahkan ini
-}
-
-// WAJIB: batalkan timer di dispose():
-@override
-void dispose() {
-  _demoAutoCloseTimer?.cancel();
-  ...
-}
-```
-
-### Yang Dibutuhkan untuk Menjalankan Skema Ini
-
-| Kebutuhan | Detail |
-|-----------|--------|
-| **Package** | Tidak ada package tambahan — hanya `dart:async` (`Timer`) |
-| **Perubahan PKB** | **Tidak ada** — PKB sudah siap menerima event `paymentCompleted` |
-| **Perubahan host app** | Tambahkan `_demoAutoCloseTimer`, `_startDemoAutoClose()`, dan 2 pemanggilan di atas |
-| **Mock API PKB** | Aktif di `api_service_pkb.dart` → `paymentVerification()` random 50% sukses |
-| **Waktu delay** | Default 5 detik — ubah `_demoAutoCloseDelay` sesuai kebutuhan demo |
-| **Untuk production** | Comment/hapus 2 baris `_startDemoAutoClose(...)` di host app |
-
-> **PENTING:** `_notifyPaymentCompleted()` menggunakan `evaluateJavascript` yang hanya berhasil
-> saat WebView aktif (tidak di-pause). Untuk Jalur B, ini aman karena setelah `_browser.close()`
-> WebView akan resume dan event sudah dikirim. Untuk Jalur A, `_notifyPaymentCompleted()` dipanggil
-> sebelum `reloadBasePage()` agar event terkirim ke halaman Finpay yang masih aktif —
-> tapi PKB belum ada di sana, jadi yang menyelamatkan adalah **timer PKB** setelah reload.
-
----
-
-## 9. Testing
-
-### Test Bridge (tanpa bayar sungguhan)
-1. Buka PKB di WebView
-2. Buka DevTools → Console
-3. Jalankan:
-   ```js
-   // Simulasi PKB kirim URL ke bridge (Jalur B)
-   SapawargaChannel.postMessage('https://m.dana.id/test')
-
-   // Simulasi pembayaran selesai (trigger verifikasi di PKB)
-   window.dispatchEvent(new CustomEvent('paymentCompleted'))
-   ```
-
-### Test Demo Auto-Trigger (di device fisik)
-1. Buka host app → WebView load PKB
-2. Pilih metode bayar apapun
-3. Tunggu 5 detik — Custom Tab/WebView harus auto-close dan PKB menampilkan status sukses
-4. Tidak perlu aksi manual apapun dari user
-
-### Test Deep Link (Android)
-```bash
-adb shell am start -W -a android.intent.action.VIEW \
-  -d "pocapp://payment/return" com.your.app.package
-```
+| `paymentHold` tidak terkirim | Dialog context tidak tersedia | Pastikan `dialogContext` di-set dari presentation layer |
+| Polling tidak berhenti | Timer cancel gagal | Cek `_stopPaymentStatusPolling()` dipanggil di dispose |
 
 ---
 
@@ -446,74 +578,78 @@ adb shell am start -W -a android.intent.action.VIEW \
 
 | Item | Nilai |
 |------|-------|
-| Bridge name | `SapawargaChannel` |
-| Event name | `paymentCompleted` |
+| Console message type | `finpay_navigation` |
+| Bridge name (fallback) | `SapawargaChannel` |
+| Event: selesai bayar | `paymentCompleted` |
+| Event: pembatalan | `paymentHold` |
 | Deep link scheme | `pocapp` |
 | Deep link host | `payment` |
 | Finpay domain (whitelist) | `live.finpay.id` |
 | Result URL pattern | `/pg/payment/card/result/` |
-| Demo timer delay | `5 detik` (ubah `_demoAutoCloseDelay`) |
-| Mock API | `api_service_pkb.dart → paymentVerification()` |
+| Payment status API | `POST http://192.168.99.46:8700/api/check-dummy-payment-status` |
+| Polling interval | `3 detik` |
 
 ### Apa yang PKB Sudah Jamin (Tidak Perlu Khawatir)
 
 | Item PKB | Status |
 |----------|--------|
 | Listen `paymentCompleted` via `registerPaymentListener()` di `initState` | ✅ |
+| Listen `paymentHold` → hit API pembatalan payment | ✅ (PKB tanggung jawab) |
 | Reentrancy guard di `doVerifyPayment()` — hanya 1 API call sekaligus | ✅ |
 | `handlePaymentCompletedFromHost()` → `stopTimer()` SEBELUM verify | ✅ |
 | `showFinpayRedirectScreen` di-reset saat verify sukses | ✅ |
 | `Timer?` nullable — aman dari crash `LateInitializationError` | ✅ |
-| `finally` block memastikan `isChecking` selalu di-reset | ✅ |
 | Listener dibersihkan di `dispose()` — tidak ada memory leak | ✅ |
-| `webview_finpay.dart` marked LEGACY — tidak konflik dengan host app | ✅ |
+
+### Yang Dikirim Host App ke PKB (Maksimal 1 Event Per Transaksi)
+
+| Event | Kapan | Detail |
+|-------|-------|--------|
+| `paymentCompleted` | API polling sukses / deep link diterima / CC/VA result URL | `{ts: timestamp}` |
+| `paymentHold` | User konfirmasi batalkan transaksi di dialog | `{ts: timestamp, kodeBayar: '...'}` |
+
+> **Tidak ada lagi:** timer bypass, tombol simulasi, `PaymentInfoChannel`, atau `_forceDummyPayment()`.
 
 ---
 
 ## 📋 PROMPT SIAP KIRIM — untuk Tim Host App
 
 > Salin dan kirimkan teks di bawah ini beserta file dokumentasi ini ke tim host app.
-> Lampirkan juga file `finpay_host_app_integration.md` sebagai referensi lengkapnya.
 
 ---
 
 ```
 Halo, kami dari tim PKB.
 
-Kami butuh bantuan untuk mengimplementasikan integrasi pembayaran Finpay
-ke dalam host app yang sudah berjalan. Kami sudah menyiapkan PKB sebagai
-Flutter Web App — kalian tidak perlu mengubah apapun di PKB.
+Kami sudah mengupdate kontrak integrasi pembayaran. Perubahan utama:
 
-Silakan baca file `finpay_host_app_integration.md` yang kami lampirkan.
-Dokumen tersebut berisi spesifikasi lengkap dan siap implementasi.
+1. KOMUNIKASI (console.log menggantikan postMessage):
+   - PKB sekarang mengirim data pembayaran via console.log(JSON.stringify({...}))
+   - Format: { "type":"finpay_navigation", "url":"...", "kodeBayar":"..." }
+   - Host app intercept via onConsoleMessage → parse JSON → buka Custom Tab
 
-Yang perlu diimplementasikan di sisi host app:
+2. POLLING STATUS PEMBAYARAN (menggantikan bypass timer):
+   - Setelah Custom Tab terbuka, host app polling:
+     POST http://192.168.99.46:8700/api/check-dummy-payment-status
+     Body: { "kodeBayar": "..." }
+   - Jika status true → auto-close Custom Tab + dispatch paymentCompleted
 
-1. PRODUCTION (wajib):
-   - Bridge SapawargaChannel (inject JS ke WebView sebelum PKB load)
-   - shouldOverrideUrlLoading: whitelist live.finpay.id + domain PKB
-   - Buka e-wallet URL via ChromeSafariBrowser (Custom Tab)
-   - Dispatch event paymentCompleted ke WebView setelah bayar
-   - Setup deep link pocapp:// di AndroidManifest & Info.plist
+3. PAYMENT HOLD (event baru):
+   - Saat user tutup Custom Tab manual → tampilkan dialog konfirmasi
+   - "Lanjutkan Bayar" → reopen Custom Tab + restart polling
+   - "Batalkan Transaksi" → dispatch event paymentHold ke PKB
+   - PKB yang menghit API pembatalan dari sisinya
 
-2. DEMO MODE (opsional, untuk simulasi tanpa bayar sungguhan):
-   Tambahkan timer native di host app yang auto-close Custom Tab
-   setelah beberapa detik, lalu dispatch event paymentCompleted ke PKB.
-   Detail kode ada di bagian "8. Demo Mode" di dokumen terlampir.
+4. YANG DIHAPUS:
+   - Timer bypass (_demoAutoCloseTimer)
+   - Tombol simulasi (SimulationToolbar)
+   - PaymentInfoChannel bridge
+   - _forceDummyPayment()
 
-   Kebutuhan:
-   - Tidak ada package tambahan (hanya dart:async Timer)
-   - Tidak ada perubahan di PKB
-   - Hanya 3 penambahan kecil di controller host app:
-     a. Field: static const _demoAutoCloseDelay = Duration(seconds: 5)
-     b. Method: _startDemoAutoClose({bool isCustomTab})
-     c. Panggil _startDemoAutoClose() setelah Custom Tab terbuka
-        dan saat WebView navigasi ke halaman Finpay
+Host app sekarang HANYA mengirim MAKSIMAL 1 event per transaksi:
+   paymentCompleted (sukses) ATAU paymentHold (dibatalkan user)
 
-   Untuk production: comment/hapus 2 baris pemanggilan _startDemoAutoClose()
-
-Kontrak integrasi lengkap (bridge name, event name, deep link scheme, dll.)
-ada di section "Referensi Cepat" di akhir dokumen.
+Detail kode dan snippet ada di file finpay_host_app_integration.md terlampir.
 
 Terima kasih.
 ```
