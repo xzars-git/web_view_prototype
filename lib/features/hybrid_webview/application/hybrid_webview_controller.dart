@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -69,7 +68,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     required AppConfig config,
     WebPermissionService? permissionService,
     WebNavigationGuard? navigationGuard,
-    Stream<Uri>? deepLinkStream,
   }) : _config = config,
        _permissionService = permissionService ?? WebPermissionService(),
        _navigationGuard = navigationGuard ?? WebNavigationGuard(config: config),
@@ -98,8 +96,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   /// Guard untuk mencegah multiple payment page di stack.
   bool _isPaymentPageOpen = false;
 
-  StreamSubscription<Uri>? _linkSubscription;
-
   /// Setter untuk WebView controller. Otomatis setup JS bridge saat di-set.
   set webViewController(InAppWebViewController? controller) {
     _webViewController = controller;
@@ -109,23 +105,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   }
 
   // ── NAVIGATION ──────────────────────────────────────────────────────────────
-
-  /// Mengecek apakah [url] berada di luar domain Sambara.
-  bool isExternalPage(String url) {
-    try {
-      final currentUri = Uri.parse(url);
-      final baseUri = Uri.parse(_config.targetUrl);
-      return currentUri.host.isNotEmpty && currentUri.host != baseUri.host;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  /// Menyimpan URL terakhir yang aman untuk navigasi back.
-  /// Hanya URL internal (domain Sambara) yang disimpan.
-  void updateLastSafeUrl(String url) {
-    // Tracking internal — tidak perlu log setiap URL
-  }
 
   /// Navigasi "smart back" di dalam WebView Sambara.
   /// Memanfaatkan history stack WebView untuk kembali ke halaman sebelumnya.
@@ -224,30 +203,29 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   // ── CONSOLE MESSAGE HANDLER ─────────────────────────────────────────────────
 
-  /// Intercept dan proses console.log dari PKB WebView.
+  /// Intercept dan proses console.log dari Sambara WebView.
   ///
   /// Mendeteksi dua jenis pesan JSON:
-  /// - `webview_navigation`: URL payment gateway → push [PaymentWebViewPage]
-  /// - `close_webview`: PKB minta tutup payment page (e.g. payment success)
+  /// - Payload dengan field `url` (webview_navigation): buka [PaymentWebViewPage]
+  /// - Payload dengan `type == "close_webview"`: tutup [PaymentWebViewPage]
   void handleConsoleMessage(BuildContext context, String message) {
-    if (!message.contains('webview_navigation') &&
-        !message.contains('close_webview')) {
+    if (!message.contains('"url"') && !message.contains('close_webview')) {
       return;
     }
 
     try {
       final Map<String, dynamic> json = jsonDecode(message);
 
-      // Trigger: PKB kirim URL payment gateway untuk dibuka
-      if (json['type'] == 'webview_navigation') {
-        final String? url = json['url']?.toString().trim();
-        if (url == null || url.isEmpty) return;
-
+      // Trigger: Sambara kirim URL payment gateway untuk dibuka
+      // Payload: {"url": "https://..."} — tidak ada field type
+      final String? url = json['url']?.toString().trim();
+      if (url != null && url.isNotEmpty) {
         AppLogger.d("[Console] Payment navigation: ${_sanitizeUrl(url)}");
         _openPaymentPage(url);
+        return;
       }
 
-      // Trigger: PKB minta tutup payment page
+      // Trigger: Sambara minta tutup payment page
       if (json['type'] == 'close_webview') {
         final String? reason = json['reason']?.toString();
         AppLogger.d("[Console] Close payment page (reason: $reason)");
@@ -265,12 +243,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   // ── LIFECYCLE ───────────────────────────────────────────────────────────────
 
-  /// Membersihkan resources saat controller tidak digunakan lagi.
-  @override
-  void dispose() {
-    _linkSubscription?.cancel();
-    super.dispose();
-  }
 
   // ── PUBLIC API ──────────────────────────────────────────────────────────────
 
@@ -314,12 +286,12 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   /// Menangani permintaan izin hardware dari Web content (kamera, mikrofon).
   Future<PermissionResponse> handleWebPermissionRequest(PermissionRequest request) async {
-    return _permissionService.handleWebPermissionRequest(request).then((d) => d.response);
+    return _permissionService.handleWebPermissionRequest(request);
   }
 
   /// Menangani permintaan izin geolokasi dari Web content.
   Future<GeolocationPermissionShowPromptResponse> handleGeolocationPrompt(String origin) async {
-    return _permissionService.handleGeolocationPrompt(origin).then((d) => d.response);
+    return _permissionService.handleGeolocationPrompt(origin);
   }
 
   /// Reload WebView Sambara ke URL awal (beranda).
@@ -345,7 +317,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     final decision = _navigationGuard.evaluate(rawUrl);
     switch (decision) {
       case NavigationHandling.allowWebView:
-        updateLastSafeUrl(rawUrl);
         return NavigationActionPolicy.ALLOW;
       case NavigationHandling.openPaymentPage:
         AppLogger.d('[Nav] External URL → payment page: ${_sanitizeUrl(rawUrl)}');

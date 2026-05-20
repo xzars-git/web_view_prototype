@@ -37,13 +37,6 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
 
-            <!-- Intent Filter untuk Deep Link Pembayaran -->
-            <intent-filter android:autoVerify="true">
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="pocapp" android:host="payment" />
-            </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
@@ -66,9 +59,6 @@
             <action android:name="android.intent.action.VIEW"/>
             <category android:name="android.intent.category.BROWSABLE"/>
             <data android:scheme="http"/>
-        </intent>
-        <intent>
-            <action android:name="android.support.customtabs.action.CustomTabsService"/>
         </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>

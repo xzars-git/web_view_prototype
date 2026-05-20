@@ -7,9 +7,6 @@ abstract class AppConfig {
   String get targetUrl;
   String get bridgeName;
 
-  String get deepLinkScheme;
-  String get deepLinkHost;
-  String get paymentEventName;
   String get appBarTitle;
   bool get isTargetUrlOverridden;
 
@@ -20,8 +17,7 @@ abstract class AppConfig {
   bool isWebViewNavigationAllowed(String rawUrl);
 
   /// Mengecek apakah URL adalah halaman hasil pembayaran Finpay (CC/VA).
-  /// Digunakan di handleNavigation untuk trigger paymentCompleted saat
-  /// Finpay redirect ke halaman sukses/gagal setelah proses bayar.
+  /// Digunakan di WebNavigationGuard untuk mengizinkan redirect result page di WebView utama.
   bool isPaymentResultUrl(String rawUrl);
 }
 
@@ -33,12 +29,6 @@ class DefaultAppConfig implements AppConfig {
   @override
   String get bridgeName => 'SapawargaChannel';
 
-  @override
-  String get deepLinkScheme => 'pocapp';
-  @override
-  String get deepLinkHost => 'payment';
-  @override
-  String get paymentEventName => 'paymentCompleted';
   @override
   String get appBarTitle => 'Hybrid WebView';
 

@@ -1,30 +1,11 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:permission_handler/permission_handler.dart' as ph;
+
+import '../../../config/logger.dart';
 
 /// Hasil dari proses permintaan izin startup.
 enum StartupPermissionOutcome { granted, denied, permanentlyDenied, failed }
 
-/// Wrapper untuk keputusan izin WebView.
-class WebPermissionDecision {
-  const WebPermissionDecision({
-    required this.response,
-    required this.granted,
-    required this.permanentlyDenied,
-  });
-
-  final PermissionResponse response;
-  final bool granted;
-  final bool permanentlyDenied;
-}
-
-/// Wrapper untuk keputusan izin geolokasi WebView.
-class GeolocationDecision {
-  const GeolocationDecision({required this.response, required this.locationServiceEnabled});
-
-  final GeolocationPermissionShowPromptResponse response;
-  final bool locationServiceEnabled;
-}
 
 /// Service untuk menangani interaksi dengan API perizinan native (Android/iOS).
 class WebPermissionService {
@@ -54,8 +35,7 @@ class WebPermissionService {
 
       return StartupPermissionOutcome.granted;
     } catch (error, stackTrace) {
-      debugPrint('requestStartupPermissions failed: $error');
-      debugPrint('$stackTrace');
+      AppLogger.e('requestStartupPermissions failed', error, stackTrace);
       return StartupPermissionOutcome.failed;
     }
   }
@@ -76,28 +56,21 @@ class WebPermissionService {
   /// 
   /// Menggunakan pola POC: Langsung memberikan izin (GRANT) karena validasi 
   /// sudah dilakukan di level sistem saat startup.
-  Future<WebPermissionDecision> handleWebPermissionRequest(PermissionRequest request) async {
-    return WebPermissionDecision(
-      granted: true,
-      permanentlyDenied: false,
-      response: PermissionResponse(
-        resources: request.resources,
-        action: PermissionResponseAction.GRANT,
-      ),
+  Future<PermissionResponse> handleWebPermissionRequest(PermissionRequest request) async {
+    return PermissionResponse(
+      resources: request.resources,
+      action: PermissionResponseAction.GRANT,
     );
   }
 
   /// Menangani callback geolokasi dari WebView.
-  /// 
+  ///
   /// Langsung memberikan izin (ALLOW) karena validasi sistem sudah dilakukan.
-  Future<GeolocationDecision> handleGeolocationPrompt(String origin) async {
-    return GeolocationDecision(
-      locationServiceEnabled: true,
-      response: GeolocationPermissionShowPromptResponse(
-        origin: origin,
-        allow: true,
-        retain: true,
-      ),
+  Future<GeolocationPermissionShowPromptResponse> handleGeolocationPrompt(String origin) async {
+    return GeolocationPermissionShowPromptResponse(
+      origin: origin,
+      allow: true,
+      retain: true,
     );
   }
 

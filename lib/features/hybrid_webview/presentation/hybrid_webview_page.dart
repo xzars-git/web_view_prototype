@@ -155,11 +155,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                               onWebViewCreated: (controller) {
                                 _controller.webViewController = controller;
                               },
-                              onLoadStart: (controller, url) {
-                                if (url != null) {
-                                  _controller.updateLastSafeUrl(url.toString());
-                                }
-                              },
                               shouldOverrideUrlLoading: (controller, navigationAction) async {
                                 return _controller.handleNavigation(navigationAction);
                               },
