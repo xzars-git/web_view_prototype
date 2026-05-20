@@ -96,6 +96,10 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   /// Guard untuk mencegah multiple payment page di stack.
   bool _isPaymentPageOpen = false;
 
+  /// True jika PaymentWebViewPage ditutup oleh event close_webview dari Sambara
+  /// (bukan oleh user menekan back). Digunakan untuk skip paymentHold.
+  bool _paymentClosedBySambara = false;
+
   /// Setter untuk WebView controller. Otomatis setup JS bridge saat di-set.
   set webViewController(InAppWebViewController? controller) {
     _webViewController = controller;
@@ -131,6 +135,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
     AppLogger.d("[Payment] Push payment page: ${_sanitizeUrl(url)}");
     _isPaymentPageOpen = true;
+    _paymentClosedBySambara = false;
 
     // Blocking call — menunggu sampai user pop payment page
     await Navigator.of(ctx).push(
@@ -140,7 +145,14 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     // Post-pop: user kembali ke Sambara
     AppLogger.d("[Payment] Payment page closed — back to Sambara");
     _isPaymentPageOpen = false;
-    _notifyPaymentHold();
+
+    // paymentHold hanya dikirim jika user menutup manual (back button).
+    // Jika Sambara yang menutup via close_webview, paymentHold tidak dikirim
+    // karena Sambara sudah tahu payment selesai.
+    if (!_paymentClosedBySambara) {
+      _notifyPaymentHold();
+    }
+    _paymentClosedBySambara = false;
   }
 
   // ── EVENTS ──────────────────────────────────────────────────────────────────
@@ -225,13 +237,14 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
         return;
       }
 
-      // Trigger: Sambara minta tutup payment page
+      // Trigger: Sambara minta tutup payment page (payment selesai)
       if (json['type'] == 'close_webview') {
         final String? reason = json['reason']?.toString();
         AppLogger.d("[Console] Close payment page (reason: $reason)");
 
         final ctx = navigatorContext;
         if (ctx != null && ctx.mounted && _isPaymentPageOpen) {
+          _paymentClosedBySambara = true;
           _isPaymentPageOpen = false;
           Navigator.of(ctx).pop();
         }
