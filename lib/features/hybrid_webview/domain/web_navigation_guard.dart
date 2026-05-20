@@ -3,20 +3,23 @@ import '../../../config/logger.dart';
 
 /// Jenis penanganan untuk navigasi URL di WebView.
 enum NavigationHandling {
-  /// Mengizinkan pemuatan di dalam WebView utama.
+  /// Mengizinkan pemuatan di dalam WebView Sambara.
   allowWebView,
 
-  /// Membuka URL di dalam WebView utama (Single WebView Strategy — dulunya Custom Tab).
-  openInCustomTab,
+  /// Membuka URL di PaymentWebViewPage (route terpisah di atas Sambara).
+  openPaymentPage,
 
-  /// Membuka URL di aplikasi eksternal (untuk deep link skema lain).
+  /// Membuka URL di aplikasi eksternal (untuk deep link skema non-http).
   externalApp,
 
-  /// Membatalkan navigasi (untuk host eksternal/non-whitelist).
+  /// Membatalkan navigasi (URL tidak diizinkan).
   cancel,
 }
 
-/// Domain Logic untuk keamanan navigasi WebView.
+/// Domain Logic untuk keamanan navigasi WebView Sambara.
+///
+/// Guard ini hanya berlaku untuk navigasi di WebView Sambara.
+/// PaymentWebViewPage memiliki policy sendiri (ALLOW semua HTTP/HTTPS).
 class WebNavigationGuard {
   final AppConfig _config;
 
@@ -31,23 +34,23 @@ class WebNavigationGuard {
     final uri = Uri.tryParse(rawUrl);
     if (uri == null) return NavigationHandling.cancel;
 
-    // 1. Non-http scheme (pocapp://, dsb.) -> External App
+    // 1. Non-http scheme (pocapp://, intent://, dsb.) → External App
     if (!uri.scheme.startsWith('http')) {
       return NavigationHandling.externalApp;
     }
 
-    // 2. Deteksi Halaman Hasil Finpay (Jalur A) -> Allow di WebView
+    // 2. Deteksi halaman hasil Finpay (CC/VA) → Allow di WebView Sambara
     if (_config.isPaymentResultUrl(rawUrl)) {
       return NavigationHandling.allowWebView;
     }
 
-    // 3. Whitelist check: PKB domain + live.finpay.id -> Allow di WebView
+    // 3. Whitelist: domain Sambara + live.finpay.id → Allow di WebView Sambara
     if (_config.isWebViewNavigationAllowed(rawUrl)) {
       return NavigationHandling.allowWebView;
     }
 
-    // 4. URL http/https di luar whitelist -> Buka di Custom Tab (Fallback)
-    AppLogger.d("GUARD: 🌐 External host detected → akan di-load in-app: ${uri.host}");
-    return NavigationHandling.openInCustomTab;
+    // 4. URL di luar whitelist → Push ke PaymentWebViewPage
+    AppLogger.d("GUARD: 🌐 External host → push payment page: ${uri.host}");
+    return NavigationHandling.openPaymentPage;
   }
 }

@@ -1,98 +1,92 @@
-# Audit & Fix: PKB Web App — Sisi Pembayaran Finpay
+# Audit & Kontrak: PKB Web App ↔ Host App — Pembayaran Finpay
 
-> **Konteks:** Dokumen ini adalah komunikasi dua arah antara Tim Host App dan Tim PKB.
-> **Status terakhir:** Semua temuan v1 telah ditangani. ✅
-> **Update v2 (2026-05-20):** Refactor besar — console handler, API polling, paymentHold.
+> **Versi:** v5 (2026-05-20) — Stack WebView Strategy
+> **Status:** Semua temuan v1-v2 telah ditangani. Arsitektur v5 aktif.
 
 ---
 
-## Perubahan Arsitektur v2 (2026-05-20)
+## Riwayat Perubahan Arsitektur
 
-### Yang Berubah dari v1
+| Versi | Arsitektur | Status |
+|-------|-----------|--------|
+| v1 | Custom Tab + manual bypass | ❌ Deprecated |
+| v2 | Custom Tab + API polling + dialog | ❌ Deprecated |
+| v3 | Single WebView replace URL | ❌ Deprecated (state hilang) |
+| **v5** | **Stack Navigator (PaymentWebViewPage)** | **✅ Aktif** |
 
-| Area | v1 (Lama) | v2 (Sekarang) |
-|------|-----------|---------------|
-| **Komunikasi E-Wallet** | `SapawargaChannel.postMessage(url)` — hanya URL | `console.log(JSON.stringify({type, url, kodeBayar}))` — URL + kodeBayar |
-| **Verifikasi Pembayaran** | Timer bypass + manual button | API polling `check-dummy-payment-status` setiap 3s |
-| **Custom Tab Close** | Langsung dispatch `paymentCompleted` | Dialog konfirmasi → `paymentHold` atau reopen |
-| **Event Baru** | — | `paymentHold` (user batalkan transaksi) |
-| **Bridge** | `SapawargaChannel` (primary) + `PaymentInfoChannel` | `console.log` (primary) + `SapawargaChannel` (fallback) |
-| **Demo/Bypass** | `_demoAutoCloseTimer`, 3 tombol simulasi | **DIHAPUS SEMUA** |
+### Kenapa v5?
+- Custom Tab → app background → OS throttle network → polling gagal
+- Replace URL → state Sambara hilang (kembali ke beranda)
+- Stack Navigator → kedua WebView hidup, app tetap foreground ✅
+
+---
+
+## Kontrak Yang Berlaku (v5 — Production)
+
+```
+HOST APP menjamin:
+  ✅ Console message handler: parse finpay_navigation JSON
+  ✅ Navigator.push(PaymentWebViewPage) — Sambara tetap hidup di bawah
+  ✅ PaymentWebViewPage: ALLOW semua HTTP/HTTPS, non-http → launchUrl external
+  ✅ Dio polling: check-dummy-payment-status setiap 5 detik (max 15 menit)
+  ✅ isPaid (code:"0000") → Navigator.pop() + dispatch paymentCompleted
+  ✅ User Back → Navigator.pop() + dispatch paymentHold
+  ✅ Bridge SapawargaChannel inject AT_DOCUMENT_START (fallback)
+  ✅ Deep link pocapp:// → Navigator.pop() + cleanup
+  ✅ dispose(): stop polling + close Dio + cancel deep link
+
+  TIDAK ADA LAGI:
+  ❌ ChromeSafariBrowser / Custom Tab
+  ❌ Dialog konfirmasi host-side (Sambara yang handle)
+  ❌ Timer bypass, simulasi, PaymentInfoChannel, _forceDummyPayment
+  ❌ Double-fire guard (tidak perlu — stack pop hanya 1x)
+
+PKB menjamin:
+  ✅ Kirim finpay_navigation via console.log(JSON.stringify({type, url, kodeBayar}))
+  ✅ Listen event paymentCompleted → doVerifyPayment()
+  ✅ Listen event paymentHold → tampilkan dialog konfirmasi pembatalan
+  ✅ doVerifyPayment() reentrancy-safe (if isChecking return)
+  ✅ finally { isChecking=false; update(); }
+  ✅ isPaymentSuccess=true → stopTimer()
+  ✅ unregisterPaymentListener() di dispose()
+  ✅ Timer? nullable-safe
+```
 
 ---
 
 ## Ringkasan Kebutuhan (Tim Host App → Tim PKB)
 
-### Apa yang Sudah Dijamin Host App (v2)
+### Yang Dijamin Host App (v5)
 
 1. **Console message handler** — `onConsoleMessage` parse JSON `finpay_navigation` untuk dapatkan URL + kodeBayar.
-2. **API polling** — `POST /api/check-dummy-payment-status` setiap 3 detik. Jika `isPaid=true`, Custom Tab auto-close + dispatch `paymentCompleted`.
-3. **Dialog konfirmasi** — Saat user tutup Custom Tab manual, muncul dialog:
-   - "Lanjutkan Bayar" → reopen Custom Tab + restart polling.
-   - "Batalkan Transaksi" → dispatch `paymentHold` ke PKB.
-4. **Bridge `SapawargaChannel`** — tetap di-inject sebagai fallback.
-5. **Guard double-fire** — Flag `_paymentNotified` mencegah event duplikat (auto-reset 3 detik).
-6. **Host app HANYA mengirim maksimal 1 event** per transaksi: `paymentCompleted` ATAU `paymentHold`.
+2. **Stack Navigator** — `Navigator.push(PaymentWebViewPage)` membuka halaman payment di atas Sambara. State Sambara 100% preserved.
+3. **Dio polling** — `POST /api/check-dummy-payment-status` setiap 5 detik (max 15 menit). Jika `code:"0000"`, auto-pop + dispatch `paymentCompleted`.
+4. **User Back handling** — Saat user tekan Back di payment page, pop + dispatch `paymentHold` ke Sambara.
+5. **Bridge `SapawargaChannel`** — tetap di-inject sebagai fallback.
+6. **Host app HANYA mengirim 1 event** per transaksi: `paymentCompleted` ATAU `paymentHold`.
 
-### Apa yang Kami Harapkan dari PKB
+### Yang Diharapkan dari PKB
 
 1. PKB **listen event `paymentCompleted`** dan langsung panggil `doVerifyPayment()`.
-2. PKB **listen event `paymentHold`** dan hit API pembatalan payment dari sisinya.
+2. PKB **listen event `paymentHold`** dan tampilkan dialog konfirmasi pembatalan.
 3. Setelah `doVerifyPayment()` sukses, PKB **navigasi sendiri** ke halaman sukses.
-4. Timer polling **berhenti** setelah `isPaymentSuccess = true`.
-5. PKB **siap menerima reopen Custom Tab** (user pilih "Lanjutkan Bayar" di dialog).
-6. PKB mengirim data via `console.log(JSON.stringify({type:"finpay_navigation", url, kodeBayar}))`.
+4. PKB mengirim data via `console.log(JSON.stringify({type:"finpay_navigation", url, kodeBayar}))`.
 
 ---
 
-## Status Temuan v1 (Untuk Referensi)
-
-Semua temuan dari audit v1 telah ditangani:
+## Status Temuan v1 (Referensi Historis)
 
 | # | Severity | Masalah | Status |
 |---|----------|---------|--------|
-| 1 | 🔴 | Duplikasi logika dispatch di `webview_finpay.dart` | ✅ Ditangani — marked LEGACY |
-| 2 | 🔴 | `unregisterPaymentListenerImpl` semicolon fragile | ✅ Fixed |
+| 1 | 🔴 | Duplikasi logika dispatch | ✅ Ditangani |
+| 2 | 🔴 | `unregisterPaymentListenerImpl` fragile | ✅ Fixed |
 | 3 | 🟡 | `doVerifyPayment` tanpa reentrancy guard | ✅ Fixed |
 | 4 | 🟡 | `handlePaymentCompletedFromHost` tidak stop timer | ✅ Fixed |
-| 5 | 🟡 | Listener tidak baca `event.detail` dari `CustomEvent` | ✅ Fixed |
-| 6 | 🟡 | `showFinpayRedirectScreen` tidak di-reset saat timer verify | ✅ Fixed |
-| 7 | 🔵 | Duplikasi bridge inject antara PKB dan host app | ✅ Ditangani |
+| 5 | 🟡 | Listener tidak baca `event.detail` | ✅ Fixed |
+| 6 | 🟡 | `showFinpayRedirectScreen` tidak di-reset | ✅ Fixed |
+| 7 | 🔵 | Duplikasi bridge inject | ✅ Ditangani |
 | 8 | 🔵 | Duplikasi `pocapp://` handling | ✅ Ditangani |
-| 9 | 🔵 | `late Timer` tanpa null-safety bisa crash | ✅ Fixed |
-
----
-
-## Kontrak Yang Berlaku (v2 — Production)
-
-```
-HOST APP menjamin:
-  ✅ Console message handler: parse finpay_navigation JSON → buka Custom Tab
-  ✅ API polling: check-dummy-payment-status setiap 3 detik
-  ✅ Auto-close Custom Tab saat isPaid=true + dispatch paymentCompleted
-  ✅ Dialog konfirmasi saat user tutup Custom Tab:
-     - "Lanjutkan Bayar" → reopen Custom Tab + restart polling
-     - "Batalkan Transaksi" → dispatch paymentHold
-  ✅ Bridge SapawargaChannel di-inject AT_DOCUMENT_START (fallback)
-  ✅ Deep link pocapp:// → _notifyPaymentCompleted() + close browser
-  ✅ CC/VA result URL → _notifyPaymentCompleted()
-  ✅ Double-fire guard: max 1 dispatch per 3 detik
-  ✅ Host HANYA mengirim maks 1 event: paymentCompleted ATAU paymentHold
-  ✅ DIHAPUS: timer bypass, simulasi, PaymentInfoChannel, _forceDummyPayment
-
-PKB menjamin:
-  ✅ Kirim finpay_navigation via console.log(JSON.stringify({...}))
-  ✅ Listen event paymentCompleted via registerPaymentListener() di initState
-  ✅ Listen event paymentHold → hit API pembatalan payment
-  ✅ handlePaymentCompletedFromHost() → stopTimer() → doVerifyPayment()
-  ✅ doVerifyPayment() reentrancy-safe (if isChecking return)
-  ✅ finally { isChecking=false; update(); } — selalu reset, tidak pernah stuck
-  ✅ isPaymentSuccess=true → showFinpayRedirectScreen=false → stopTimer()
-  ✅ unregisterPaymentListener() di dispose()
-  ✅ Timer? nullable-safe, tidak crash di edge case
-  ✅ Listener log event.detail.ts untuk debugging
-  ✅ webview_finpay.dart hanya aktif di standalone mode
-```
+| 9 | 🔵 | `late Timer` tanpa null-safety | ✅ Fixed |
 
 ---
 
@@ -107,10 +101,9 @@ File target:
 
 Yang harus dilakukan:
 
-1. Di method paymentVerification(), hapus blok DEMO MODE (baris return + delay + random):
+1. Di method paymentVerification(), hapus blok DEMO MODE:
      await Future.delayed(const Duration(milliseconds: 600));
      final bool isSuccess = Random().nextBool();
-     debugPrint(...);
      return { ... status_payment: isSuccess ... };
 
 2. Hapus komentar "// ignore: dead_code" di atas blok try.

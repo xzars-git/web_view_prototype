@@ -542,7 +542,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       case NavigationHandling.allowWebView:
         updateLastSafeUrl(rawUrl);
         return NavigationActionPolicy.ALLOW;
-      case NavigationHandling.openInCustomTab:
+      case NavigationHandling.openPaymentPage:
         // Stack Strategy: push PaymentWebViewPage
         AppLogger.d('[Nav] External URL → push payment page: ${_sanitizeUrl(rawUrl)}');
         _openPaymentPage(rawUrl, _activeKodeBayar);
