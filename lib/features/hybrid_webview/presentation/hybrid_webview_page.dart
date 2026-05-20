@@ -66,7 +66,8 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
 
   @override
   Widget build(BuildContext context) {
-
+    // Update navigator context setiap build agar controller bisa push PaymentWebViewPage.
+    _controller.navigatorContext = context;
     // Mendengarkan perubahan state dari controller secara reaktif menggunakan ValueListenableBuilder.
     return ValueListenableBuilder<HybridWebViewState>(
       valueListenable: _controller,
@@ -87,11 +88,9 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
                 icon: const Icon(Icons.arrow_back),
                 onPressed: () async {
                   final controller = _controller.webViewController;
-                  // Jika WebView bisa kembali, gunakan smartGoBack.
                   if (controller != null && await controller.canGoBack()) {
                     await _controller.smartGoBack();
                   } else {
-                    // Jika tidak bisa kembali di history web, tutup halaman native.
                     if (context.mounted) Navigator.of(context).pop();
                   }
                 },
