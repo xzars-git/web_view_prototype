@@ -8,14 +8,9 @@ import '../../../config/logger.dart';
 /// Sambara tetap hidup di background — state tidak hilang.
 /// Saat pop, Sambara langsung terlihat kembali di kondisi terakhir.
 class PaymentWebViewPage extends StatefulWidget {
-  const PaymentWebViewPage({
-    super.key,
-    required this.paymentUrl,
-    required this.kodeBayar,
-  });
+  const PaymentWebViewPage({super.key, required this.paymentUrl});
 
   final String paymentUrl;
-  final String kodeBayar;
 
   @override
   State<PaymentWebViewPage> createState() => _PaymentWebViewPageState();
@@ -53,7 +48,10 @@ class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
       final schemeMatch = RegExp(r'scheme=([^;]+)').firstMatch(rawUrl);
       if (schemeMatch != null) {
         final targetScheme = schemeMatch.group(1)!;
-        final intentPath = rawUrl.replaceFirst('intent://', '$targetScheme://').split('#Intent').first;
+        final intentPath = rawUrl
+            .replaceFirst('intent://', '$targetScheme://')
+            .split('#Intent')
+            .first;
         return Uri.tryParse(intentPath);
       }
     } catch (e) {
@@ -85,9 +83,7 @@ class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
         body: Stack(
           children: [
             InAppWebView(
-              initialUrlRequest: URLRequest(
-                url: WebUri(widget.paymentUrl),
-              ),
+              initialUrlRequest: URLRequest(url: WebUri(widget.paymentUrl)),
               initialSettings: InAppWebViewSettings(
                 javaScriptEnabled: true,
                 useShouldOverrideUrlLoading: true,
@@ -178,10 +174,7 @@ class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
             if (_progress < 1)
               Align(
                 alignment: Alignment.topCenter,
-                child: LinearProgressIndicator(
-                  value: _progress,
-                  minHeight: 2,
-                ),
+                child: LinearProgressIndicator(value: _progress, minHeight: 2),
               ),
           ],
         ),

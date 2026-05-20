@@ -1,7 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:app_links/app_links.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -59,7 +57,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   }) : _config = config,
        _permissionService = permissionService ?? WebPermissionService(),
        _navigationGuard = navigationGuard ?? WebNavigationGuard(config: config),
-       _deepLinkStreamOverride = deepLinkStream,
        super(
          const HybridWebViewState(
            status: 'Menyiapkan aplikasi...',
@@ -69,13 +66,11 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
          ),
        ) {
     AppLogger.d("[System] Controller Initialized — Stack WebView Strategy");
-    _initDeepLinks();
   }
 
   final AppConfig _config;
   final WebPermissionService _permissionService;
   final WebNavigationGuard _navigationGuard;
-  final Stream<Uri>? _deepLinkStreamOverride;
 
   InAppWebViewController? _webViewController;
   InAppWebViewController? get webViewController => _webViewController;
@@ -83,39 +78,9 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   /// Navigator context — di-set dari page agar bisa push PaymentWebViewPage.
   BuildContext? navigatorContext;
 
-  /// Kode bayar aktif saat ini.
-  String? _activeKodeBayar;
-
   /// Flag: apakah payment page sedang terbuka di stack.
   bool _isPaymentPageOpen = false;
 
-  /// Timer polling & batas waktu.
-  Timer? _paymentStatusPoller;
-  Timer? _pollingMaxTimer;
-
-  /// Guard concurrent polling.
-  bool _isPollingPayment = false;
-
-  /// Error log suppression.
-  int _pollingErrorCount = 0;
-  static const int _maxPollingErrorLog = 3;
-
-  /// Konfigurasi durasi polling.
-  static const Duration _pollingInterval = Duration(seconds: 5);
-  static const Duration _pollingMaxDuration = Duration(minutes: 15);
-
-  /// Dio instance — persistent connection pool.
-  final Dio _dio = Dio(
-    BaseOptions(
-      baseUrl: 'http://192.168.99.46:8700',
-      connectTimeout: const Duration(seconds: 5),
-      receiveTimeout: const Duration(seconds: 5),
-      sendTimeout: const Duration(seconds: 5),
-      contentType: 'application/json',
-    ),
-  );
-
-  late AppLinks _appLinks;
   StreamSubscription<Uri>? _linkSubscription;
 
   set webViewController(InAppWebViewController? controller) {
@@ -156,7 +121,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
   /// Push PaymentWebViewPage di atas Sambara.
   /// Sambara tetap hidup di background — state tidak hilang sama sekali.
-  Future<void> _openPaymentPage(String url, String? kodeBayar) async {
+  Future<void> _openPaymentPage(String url) async {
     final ctx = navigatorContext;
     if (ctx == null || !ctx.mounted) {
       AppLogger.d("[Payment] ❌ Navigator context tidak tersedia");
@@ -171,23 +136,15 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     AppLogger.d("[Payment] ════════════════════════════════");
     AppLogger.d("[Payment] 🚀 Push PaymentWebViewPage ke stack");
     AppLogger.d("[Payment] URL: ${Uri.tryParse(url)?.host}${Uri.tryParse(url)?.path}");
-    AppLogger.d("[Payment] kodeBayar: ${kodeBayar ?? 'null'}");
     AppLogger.d("[Payment] Sambara tetap aktif di background ✅");
     AppLogger.d("[Payment] ════════════════════════════════");
 
-    _activeKodeBayar = kodeBayar;
     _isPaymentPageOpen = true;
-    _pollingErrorCount = 0;
-
-    // Jalankan polling SEBELUM push — agar polling tidak bergantung pada UI
-    _startPaymentStatusPolling();
 
     // Push payment page ke atas Sambara
-    await Navigator.of(ctx).push(
-      MaterialPageRoute(
-        builder: (_) => PaymentWebViewPage(paymentUrl: url, kodeBayar: kodeBayar ?? ''),
-      ),
-    );
+    await Navigator.of(
+      ctx,
+    ).push(MaterialPageRoute(builder: (_) => PaymentWebViewPage(paymentUrl: url)));
 
     // Eksekusi di sini saat user POP (back) dari payment page
     AppLogger.d("[Payment] ════════════════════════════════");
@@ -198,11 +155,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     _isPaymentPageOpen = false;
 
     // Jika polling masih jalan (belum paid) → user cancel
-    if (_paymentStatusPoller != null) {
-      _stopPaymentStatusPolling();
-      _notifyPaymentHold();
-    }
-    _activeKodeBayar = null;
+    _notifyPaymentHold();
   }
 
   // ── EVENTS ────────────────────────────────────────────────────────────────
@@ -210,24 +163,9 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   void _notifyPaymentHold() {
     AppLogger.d("[Event] ════════════════════════════════");
     AppLogger.d("[Event] 🔴 DISPATCH 'paymentHold' ke Sambara");
-    AppLogger.d("[Event] kodeBayar: ${_activeKodeBayar ?? 'null'}");
     AppLogger.d("[Event] ════════════════════════════════");
     _webViewController?.evaluateJavascript(
-      source:
-          "window.dispatchEvent(new CustomEvent('paymentHold', "
-          "{detail:{ts:Date.now(), kodeBayar:'${_activeKodeBayar ?? ''}'}}));",
-    );
-  }
-
-  void _notifyPaymentCompleted() {
-    AppLogger.d("[Event] ════════════════════════════════");
-    AppLogger.d("[Event] 💰 DISPATCH 'paymentCompleted' ke Sambara");
-    AppLogger.d("[Event] kodeBayar: ${_activeKodeBayar ?? 'null'}");
-    AppLogger.d("[Event] ════════════════════════════════");
-    _webViewController?.evaluateJavascript(
-      source:
-          "window.dispatchEvent(new CustomEvent('paymentCompleted', "
-          "{detail:{ts:Date.now(), kodeBayar:'${_activeKodeBayar ?? ''}', status:'success'}}));",
+      source: "window.dispatchEvent(new CustomEvent('paymentHold'));",
     );
   }
 
@@ -282,21 +220,16 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     final preview = message.length > 120 ? '${message.substring(0, 120)}...' : message;
     AppLogger.d("[JS] $preview");
 
-    if (!message.contains('finpay_navigation')) return;
+    if (!message.contains('webview_navigation')) return;
 
     AppLogger.d("[Console] ════════════════════════════════");
-    AppLogger.d("[Console] 📨 Mendeteksi finpay_navigation");
+    AppLogger.d("[Console] 📨 Mendeteksi webview_navigation");
 
     try {
       final Map<String, dynamic> json = jsonDecode(message);
 
-      if (json['type'] == 'finpay_navigation') {
+      if (json['type'] == 'webview_navigation') {
         final String? url = json['url']?.toString().trim();
-        final String? kodeBayar = json['kodeBayar']?.toString().trim();
-
-        AppLogger.d("[Console] ✅ type: finpay_navigation");
-        AppLogger.d("[Console] 🔑 kodeBayar: ${kodeBayar ?? 'NULL'}");
-        AppLogger.d("[Console] 🔗 host: ${url != null ? Uri.tryParse(url)?.host : 'null'}");
 
         if (url == null || url.isEmpty) {
           AppLogger.d("[Console] ❌ URL kosong");
@@ -308,18 +241,17 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
         AppLogger.d("[Console] ════════════════════════════════");
 
         // Push payment page ke atas Sambara (tidak mengganggu state Sambara)
-        _openPaymentPage(url, kodeBayar);
+        _openPaymentPage(url);
       }
 
-      if (json['type'] == 'close_tab') {
+      if (json['type'] == 'close_webview') {
         final String? reason = json['reason']?.toString();
 
-        AppLogger.d("[Console] ✅ type: close_tab");
+        AppLogger.d("[Console] ✅ type: close_webview");
         AppLogger.d("[Console] ℹ️ reason: $reason");
 
         if (reason == 'payment_success') {
-          AppLogger.d("[Console] 💰 Payment success via close_tab");
-          _activeKodeBayar = null;
+          AppLogger.d("[Console] 💰 Payment success via close_webview");
         }
 
         // Pop payment page jika terbuka
@@ -336,166 +268,10 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     }
   }
 
-  // ── PAYMENT STATUS POLLING ────────────────────────────────────────────────
-
-  void _startPaymentStatusPolling() {
-    if (_activeKodeBayar == null || _activeKodeBayar!.isEmpty) {
-      AppLogger.d("[Polling] ⚠️ Tidak ada kodeBayar — skip");
-      return;
-    }
-
-    _stopPaymentStatusPolling();
-    _pollingErrorCount = 0;
-
-    AppLogger.d("[Polling] ▶️ Polling DIMULAI");
-    AppLogger.d("[Polling] kodeBayar  : $_activeKodeBayar");
-    AppLogger.d("[Polling] interval   : ${_pollingInterval.inSeconds} detik");
-    AppLogger.d("[Polling] max durasi : ${_pollingMaxDuration.inMinutes} menit");
-    AppLogger.d("[Polling] base url   : ${_dio.options.baseUrl}");
-
-    _paymentStatusPoller = Timer.periodic(_pollingInterval, (_) {
-      _checkPaymentStatus();
-    });
-
-    _pollingMaxTimer = Timer(_pollingMaxDuration, () {
-      AppLogger.d("[Polling] ⏰ Batas ${_pollingMaxDuration.inMinutes} menit — stop");
-      _stopPaymentStatusPolling();
-    });
-  }
-
-  void _stopPaymentStatusPolling() {
-    if (_paymentStatusPoller != null) {
-      AppLogger.d("[Polling] ⏹️ Polling DIHENTIKAN");
-    }
-    _paymentStatusPoller?.cancel();
-    _paymentStatusPoller = null;
-    _pollingMaxTimer?.cancel();
-    _pollingMaxTimer = null;
-    _isPollingPayment = false;
-  }
-
-  Future<void> _checkPaymentStatus() async {
-    if (_isPollingPayment) return;
-    if (_activeKodeBayar == null) {
-      _stopPaymentStatusPolling();
-      return;
-    }
-
-    _isPollingPayment = true;
-    try {
-      final requestBody = {'kodeBayar': _activeKodeBayar};
-
-      AppLogger.d("[Polling] 🔄 POST /api/check-dummy-payment-status");
-      AppLogger.d("[Polling] Request body: $requestBody");
-
-      final response = await _dio.post<Map<String, dynamic>>(
-        '/api/check-dummy-payment-status',
-        data: requestBody,
-      );
-
-      AppLogger.d("[Polling] Response status : ${response.statusCode}");
-      AppLogger.d("[Polling] Response body   : ${response.data}");
-
-      if (response.statusCode == 200 && response.data != null) {
-        final body = response.data!;
-
-        AppLogger.d("[Polling] ── Parsed Response ──");
-        AppLogger.d("[Polling]   success : ${body['success']}");
-        AppLogger.d("[Polling]   code    : ${body['code']}");
-        AppLogger.d("[Polling]   message : ${body['message']}");
-        AppLogger.d("[Polling]   param   : ${body['param']}");
-
-        final bool isPaid = body['success'] == true && body['code'] == '0000';
-        AppLogger.d("[Polling]   isPaid  : $isPaid");
-        AppLogger.d("[Polling] ────────────────────");
-
-        _pollingErrorCount = 0;
-
-        if (isPaid) {
-          AppLogger.d("[Polling] ════════════════════════════════");
-          AppLogger.d("[Polling] 💰 LUNAS — kodeBayar: $_activeKodeBayar");
-          AppLogger.d("[Polling] → Pop payment page + dispatch paymentCompleted");
-          AppLogger.d("[Polling] ════════════════════════════════");
-
-          _stopPaymentStatusPolling();
-
-          // Pop payment page — Sambara muncul kembali dalam kondisi terakhir
-          final ctx = navigatorContext;
-          if (ctx != null && ctx.mounted && _isPaymentPageOpen) {
-            _isPaymentPageOpen = false;
-            Navigator.of(ctx).pop();
-          }
-
-          // Dispatch paymentCompleted ke Sambara setelah pop
-          Future.delayed(const Duration(milliseconds: 500), () {
-            _notifyPaymentCompleted();
-            _activeKodeBayar = null;
-          });
-
-          return;
-        } else {
-          AppLogger.d("[Polling] ⏳ Belum lunas — lanjut polling");
-        }
-      }
-    } on DioException catch (e) {
-      _pollingErrorCount++;
-      if (_pollingErrorCount <= _maxPollingErrorLog) {
-        AppLogger.d("[Polling] ❌ DioError ke-$_pollingErrorCount/$_maxPollingErrorLog");
-        AppLogger.d("[Polling]   type    : ${e.type.name}");
-        AppLogger.d("[Polling]   message : ${e.message}");
-        if (e.response != null) {
-          AppLogger.d("[Polling]   status  : ${e.response?.statusCode}");
-          AppLogger.d("[Polling]   body    : ${e.response?.data}");
-        }
-        if (_pollingErrorCount == 1) {
-          AppLogger.d(
-            "[Polling] 💡 Cek: device & PC di WiFi yang sama? Server di ${_dio.options.baseUrl}?",
-          );
-        }
-        if (_pollingErrorCount == _maxPollingErrorLog) {
-          AppLogger.d("[Polling] 🔕 Log disuppress — polling tetap berjalan.");
-        }
-      }
-    } catch (e) {
-      _pollingErrorCount++;
-      if (_pollingErrorCount <= _maxPollingErrorLog) {
-        AppLogger.d("[Polling] ❌ Error ke-$_pollingErrorCount/$_maxPollingErrorLog: $e");
-      }
-    } finally {
-      _isPollingPayment = false;
-    }
-  }
-
-  // ── DEEP LINKS ────────────────────────────────────────────────────────────
-
-  void _initDeepLinks() {
-    _appLinks = AppLinks();
-    final stream = _deepLinkStreamOverride ?? _appLinks.uriLinkStream;
-    _linkSubscription = stream.listen((uri) async {
-      AppLogger.d("[DeepLink] ════════════════════════════════");
-      AppLogger.d("[DeepLink] 📲 Diterima: ${uri.scheme}://${uri.host}${uri.path}");
-      if (uri.scheme == _config.deepLinkScheme && uri.host == _config.deepLinkHost) {
-        AppLogger.d("[DeepLink] ✅ Cocok — stop polling + pop payment page");
-        _stopPaymentStatusPolling();
-        final ctx = navigatorContext;
-        if (ctx != null && ctx.mounted && _isPaymentPageOpen) {
-          _isPaymentPageOpen = false;
-          Navigator.of(ctx).pop();
-        }
-        _activeKodeBayar = null;
-      } else {
-        AppLogger.d("[DeepLink] ⚠️ Tidak cocok — diabaikan");
-      }
-      AppLogger.d("[DeepLink] ════════════════════════════════");
-    });
-  }
-
   // ── LIFECYCLE ─────────────────────────────────────────────────────────────
 
   @override
   void dispose() {
-    _stopPaymentStatusPolling();
-    _dio.close();
     _linkSubscription?.cancel();
     super.dispose();
   }
@@ -563,7 +339,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       case NavigationHandling.openPaymentPage:
         // Stack Strategy: push PaymentWebViewPage
         AppLogger.d('[Nav] External URL → push payment page: ${_sanitizeUrl(rawUrl)}');
-        _openPaymentPage(rawUrl, _activeKodeBayar);
+        _openPaymentPage(rawUrl);
         return NavigationActionPolicy.CANCEL;
       case NavigationHandling.externalApp:
         if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
@@ -582,6 +358,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       return;
     }
     AppLogger.d("[Bridge] → push payment page: ${_sanitizeUrl(url)}");
-    _openPaymentPage(url, _activeKodeBayar);
+    _openPaymentPage(url);
   }
 }
