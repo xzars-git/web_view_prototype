@@ -313,20 +313,23 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
       if (json['type'] == 'close_tab') {
         final String? reason = json['reason']?.toString();
-        final String? kodeBayar = json['kodeBayar']?.toString();
 
         AppLogger.d("[Console] ✅ type: close_tab");
         AppLogger.d("[Console] ℹ️ reason: $reason");
 
-        // Jika sukses, hentikan polling & kirim event sukses ke Sambara
         if (reason == 'payment_success') {
-          AppLogger.d("[Console] 💰 Payment success detected via close_tab");
-          _activeKodeBayar = null; // Menandai sudah ditangani
+          AppLogger.d("[Console] 💰 Payment success via close_tab");
+          _activeKodeBayar = null;
         }
 
-        AppLogger.d("[Console] → Popping current page");
+        // Pop payment page jika terbuka
+        final ctx = navigatorContext;
+        if (ctx != null && ctx.mounted && _isPaymentPageOpen) {
+          AppLogger.d("[Console] → Pop payment page");
+          _isPaymentPageOpen = false;
+          Navigator.of(ctx).pop();
+        }
         AppLogger.d("[Console] ════════════════════════════════");
-        Navigator.of(context).pop();
       }
     } catch (e) {
       AppLogger.d("[Console] ❌ JSON parse error: $e");

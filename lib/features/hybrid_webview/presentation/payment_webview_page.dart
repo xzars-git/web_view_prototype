@@ -24,13 +24,50 @@ class PaymentWebViewPage extends StatefulWidget {
 class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
   double _progress = 0;
 
+  /// Coba buka deep link di external app.
+  /// Jika app terinstall → buka app. Jika tidak → return false.
+  /// TIDAK redirect ke store karena payment gateway punya web checkout fallback.
+  Future<bool> _tryLaunchDeepLink(Uri uri) async {
+    final scheme = uri.scheme.toLowerCase();
+    AppLogger.d("[PaymentPage] 🔗 Deep link: $scheme");
+
+    try {
+      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (launched) {
+        AppLogger.d("[PaymentPage] ✅ App $scheme terbuka");
+        return true;
+      }
+    } catch (e) {
+      AppLogger.d("[PaymentPage] ⚠️ App $scheme tidak terinstall — web fallback aktif");
+    }
+
+    // App tidak terinstall → biarkan web checkout page yang handle
+    AppLogger.d("[PaymentPage] 🌐 Fallback ke web checkout (app tidak ada)");
+    return false;
+  }
+
+  /// Parse `intent://` URI → extract scheme asli.
+  /// Format: intent://...#Intent;scheme=shopeepayid;package=com.shopee.pay;end
+  Uri? _parseIntentUri(String rawUrl) {
+    try {
+      final schemeMatch = RegExp(r'scheme=([^;]+)').firstMatch(rawUrl);
+      if (schemeMatch != null) {
+        final targetScheme = schemeMatch.group(1)!;
+        final intentPath = rawUrl.replaceFirst('intent://', '$targetScheme://').split('#Intent').first;
+        return Uri.tryParse(intentPath);
+      }
+    } catch (e) {
+      AppLogger.d("[PaymentPage] ⚠️ Intent URI parse error: $e");
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
-        // Kembali ke Sambara — pop route ini
         AppLogger.d("[PaymentPage] 🔙 User back — returning to Sambara");
         if (context.mounted) Navigator.of(context).pop();
       },
@@ -54,7 +91,6 @@ class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
               initialSettings: InAppWebViewSettings(
                 javaScriptEnabled: true,
                 useShouldOverrideUrlLoading: true,
-                // Izinkan semua mixed content (HTTP di dalam HTTPS payment page)
                 mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
                 useWideViewPort: true,
                 loadWithOverviewMode: true,
@@ -64,10 +100,8 @@ class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
                 domStorageEnabled: true,
                 databaseEnabled: true,
                 mediaPlaybackRequiresUserGesture: false,
-                // Izinkan popup dari payment gateway
                 supportMultipleWindows: false,
                 javaScriptCanOpenWindowsAutomatically: true,
-                // Custom user agent agar payment gateway tidak block WebView
                 userAgent:
                     'Mozilla/5.0 (Linux; Android 10; Mobile) '
                     'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -88,24 +122,51 @@ class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
 
                 if (rawUrl.isEmpty) return NavigationActionPolicy.ALLOW;
 
-                // Non-http scheme (intent://, dana://, dll) → buka external app
-                if (!rawUrl.startsWith('http')) {
-                  AppLogger.d("[PaymentPage] 🔗 External scheme: ${uri?.scheme} → launchUrl");
-                  if (uri != null) {
-                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                // ═══ intent:// scheme ═══
+                // Parse intent URI → extract scheme asli → coba launch app.
+                if (rawUrl.startsWith('intent://')) {
+                  AppLogger.d("[PaymentPage] 🔗 Intent URI detected");
+                  final targetUri = _parseIntentUri(rawUrl);
+                  if (targetUri != null) {
+                    await _tryLaunchDeepLink(targetUri);
                   }
                   return NavigationActionPolicy.CANCEL;
                 }
 
-                // Semua URL http/https diizinkan di dalam WebView payment
+                // ═══ Non-http scheme (shopeepayid://, dana://, linkaja://, dll) ═══
+                // Coba buka app. Kalau gagal, CANCEL saja — web checkout tetap aktif.
+                if (!rawUrl.startsWith('http')) {
+                  if (uri != null) {
+                    await _tryLaunchDeepLink(uri);
+                  }
+                  return NavigationActionPolicy.CANCEL;
+                }
+
+                // ═══ HTTP/HTTPS — ALLOW semua di payment WebView ═══
                 AppLogger.d("[PaymentPage] 🌐 ALLOW: ${uri?.host}${uri?.path}");
                 return NavigationActionPolicy.ALLOW;
               },
               onReceivedError: (controller, request, error) {
-                AppLogger.d("[PaymentPage] ❌ Error: ${error.description}");
+                final errorUrl = request.url.toString();
+                final description = error.description;
+                AppLogger.d("[PaymentPage] ❌ Error: $description");
+
+                // ERR_UNKNOWN_URL_SCHEME — deep link via JS window.location
+                // yang menembus shouldOverrideUrlLoading.
+                // Solusi: goBack() ke halaman HTTPS sebelumnya.
+                // Web checkout page punya fallback sendiri.
+                if (description.contains('ERR_UNKNOWN_URL_SCHEME')) {
+                  AppLogger.d("[PaymentPage] 🔧 Unknown scheme → goBack ke web checkout");
+                  // Coba launch app dulu (kalau terinstall)
+                  final failedUri = Uri.tryParse(errorUrl);
+                  if (failedUri != null && !errorUrl.startsWith('http')) {
+                    _tryLaunchDeepLink(failedUri);
+                  }
+                  // Kembali ke halaman HTTPS sebelumnya (web checkout fallback)
+                  controller.goBack();
+                }
               },
               onCreateWindow: (controller, createWindowAction) async {
-                // Handle popup/window baru di payment page — load di WebView yang sama
                 final url = createWindowAction.request.url;
                 if (url != null) {
                   AppLogger.d("[PaymentPage] 🪟 New window → redirect in-page: $url");
@@ -114,7 +175,6 @@ class _PaymentWebViewPageState extends State<PaymentWebViewPage> {
                 return false;
               },
             ),
-            // Progress bar
             if (_progress < 1)
               Align(
                 alignment: Alignment.topCenter,
