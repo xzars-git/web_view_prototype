@@ -48,12 +48,6 @@ Dokumen ini menyajikan spesifikasi teknis dan panduan integrasi antara Sambara W
 | `flutter_lints` | ^5.0.0 | Code quality      |
 | `mocktail`      | ^1.0.4 | Mocking untuk tes |
 
-### Tools Opsional
-
-- **Android Studio** atau **VS Code**: IDE untuk development
-- **GitHub Desktop** / **Git CLI**: Version control
-- **Postman** / **Insomnia**: Testing API (jika diperlukan)
-
 ---
 
 ## Ruang Lingkup Integrasi
@@ -248,15 +242,3 @@ Pengguna                Sambara Web             Sapawarga App           PaymentW
 ```
 
 ---
-
-## Ringkasan Perubahan dari Versi Sebelumnya
-
-| Aspek                                | Versi Lama                     | Versi Saat Ini                                     |
-| ------------------------------------ | ------------------------------ | -------------------------------------------------- |
-| Mekanisme pembukaan pembayaran       | Custom Tab / Browser Native    | `PaymentWebViewPage` (Flutter Navigator Stack)     |
-| Nama*event* buka pembayaran          | `finpay_navigation`            | `webview_navigation`                               |
-| Payload*event* buka pembayaran       | `type`, `url`, `kodeBayar`     | `url` saja                                         |
-| Verifikasi status pembayaran         | API Polling oleh Sapawarga     | Tidak ada (tanggung jawab Sambara Web)             |
-| Nama*event* tutup halaman            | `close_tab`                    | `close_webview`                                    |
-| Trigger penutupan halaman pembayaran | API Polling sukses / deep link | _Console message_ `close_webview` dari Sambara Web |
-| _Event_ ke Sambara setelah tutup     | `paymentCompleted`             | `paymentHold`                                      |
