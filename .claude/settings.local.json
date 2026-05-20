@@ -5,7 +5,8 @@
       "Bash(Select-Object FullName)",
       "Bash(ConvertTo-Json -AsArray)",
       "Bash(Out-String)",
-      "Bash(dart analyze *)"
+      "Bash(dart analyze *)",
+      "PowerShell(Set-Content *)"
     ]
   }
 }

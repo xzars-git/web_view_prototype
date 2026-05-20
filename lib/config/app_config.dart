@@ -5,7 +5,6 @@ abstract class AppConfig {
   String get prodEnv;
   String get currentEnvironment;
   String get targetUrl;
-  String get bridgeName;
 
   String get appBarTitle;
   bool get isTargetUrlOverridden;
@@ -26,8 +25,6 @@ class DefaultAppConfig implements AppConfig {
 
   @override
   String get prodEnv => 'prod';
-  @override
-  String get bridgeName => 'SapawargaChannel';
 
   @override
   String get appBarTitle => 'Hybrid WebView';
