@@ -1,56 +1,61 @@
 import '../../../config/app_config.dart';
-import '../../../config/logger.dart';
 
-/// Jenis penanganan untuk navigasi URL di WebView.
+/// Jenis penanganan untuk navigasi URL di WebView Sambara.
 enum NavigationHandling {
-  /// Mengizinkan pemuatan di dalam WebView Sambara.
+  /// Izinkan dimuat di WebView Sambara (domain dalam whitelist).
   allowWebView,
 
-  /// Membuka URL di PaymentWebViewPage (route terpisah di atas Sambara).
+  /// Buka di [PaymentWebViewPage] (domain di luar whitelist).
   openPaymentPage,
 
-  /// Membuka URL di aplikasi eksternal (untuk deep link skema non-http).
+  /// Buka di aplikasi eksternal (deep link non-http).
   externalApp,
 
-  /// Membatalkan navigasi (URL tidak diizinkan).
+  /// Tolak navigasi.
   cancel,
 }
 
-/// Domain Logic untuk keamanan navigasi WebView Sambara.
+/// Domain logic untuk keamanan navigasi WebView Sambara.
 ///
-/// Guard ini hanya berlaku untuk navigasi di WebView Sambara.
-/// PaymentWebViewPage memiliki policy sendiri (ALLOW semua HTTP/HTTPS).
+/// Guard ini mengevaluasi setiap URL yang dimuat di WebView Sambara
+/// dan menentukan cara penangannya berdasarkan whitelist dan pola URL.
+///
+/// Catatan: [PaymentWebViewPage] memiliki policy sendiri — ALLOW semua HTTP/HTTPS.
+/// Guard ini HANYA berlaku untuk navigasi di WebView utama Sambara.
 class WebNavigationGuard {
   final AppConfig _config;
 
   const WebNavigationGuard({required AppConfig config}) : _config = config;
 
-  /// Mengevaluasi URL untuk menentukan tindakan navigasi.
+  /// Evaluasi [rawUrl] dan tentukan [NavigationHandling] yang sesuai.
+  ///
+  /// Urutan pengecekan (penting):
+  /// 1. Non-http scheme → [externalApp]
+  /// 2. Payment result URL (Finpay CC/VA) → [allowWebView]
+  /// 3. Whitelist domain (Sambara + Finpay) → [allowWebView]
+  /// 4. Domain lainnya → [openPaymentPage]
   NavigationHandling evaluate(String rawUrl) {
-    if (rawUrl.isEmpty) {
-      return NavigationHandling.allowWebView;
-    }
+    if (rawUrl.isEmpty) return NavigationHandling.allowWebView;
 
     final uri = Uri.tryParse(rawUrl);
     if (uri == null) return NavigationHandling.cancel;
 
-    // 1. Non-http scheme (pocapp://, intent://, dsb.) → External App
+    // Non-http scheme (pocapp://, intent://, dsb.) → External App
     if (!uri.scheme.startsWith('http')) {
       return NavigationHandling.externalApp;
     }
 
-    // 2. Deteksi halaman hasil Finpay (CC/VA) → Allow di WebView Sambara
+    // Halaman hasil pembayaran Finpay (CC/VA return URL)
     if (_config.isPaymentResultUrl(rawUrl)) {
       return NavigationHandling.allowWebView;
     }
 
-    // 3. Whitelist: domain Sambara + live.finpay.id → Allow di WebView Sambara
+    // Domain dalam whitelist (Sambara + live.finpay.id)
     if (_config.isWebViewNavigationAllowed(rawUrl)) {
       return NavigationHandling.allowWebView;
     }
 
-    // 4. URL di luar whitelist → Push ke PaymentWebViewPage
-    AppLogger.d("GUARD: 🌐 External host → push payment page: ${uri.host}");
+    // Domain di luar whitelist → Push ke PaymentWebViewPage
     return NavigationHandling.openPaymentPage;
   }
 }
