@@ -1,8 +1,8 @@
 # Snippet Code — Host App Payment Integration
 
-> **Versi:** 2026-05-20
+> **Versi:** 2026-05-20 (v2 — enhanced debug logging)
 > **File sumber:** `hybrid_webview_controller.dart`
-> **Package:** `flutter_inappwebview`, `http`, `url_launcher`
+> **Package:** `flutter_inappwebview`, `http`, `url_launcher`, `app_links`
 
 ---
 
@@ -15,7 +15,7 @@ PKB mengirim data pembayaran e-wallet via `console.log`. Host app menangkap mela
 ```json
 {
     "type": "finpay_navigation",
-    "url": "https://m.dana.id/n/cashier/new/checkout?bizNo=20260520111212800110166257009864415&timestamp=1779243923129&originSourcePlatform=IPG&mid=216620000924815941781&did=216650001303284791789&sign=jSNPe6VJN5MOVogTk30zJDuS6D73zKzTFFITlyknQ%2FD7tzmFKf022Q7AatjJDJ7ceZ%2Fn7i%2FFAubrJTRY6L5QDqb0KtMJRLgKEjQKe36pmS%2FORnTJtoEqEhkBJwKKOKjno%2BiaxDIDn2Iba1aSfnhHMjL2MtGxvZqE53w93sT2VgWYGCML%2BVsKxdEDjFr1xuq5HPJqTEMu9IXYmnmzVrdr6qJndmII4GkQRiYfxbOfZ%2F%2B8ZZducZ6Yjmxm5DrTd5JioXjkkEI5EofmUc9ENdDUAC%2FABQC%2BdmjfPXpuV%2BQao%2BwU%2FdLz6sX8KizP%2Fc9rV%2FEIAe38LtoGime5ddeos6hckw%3D%3D&forceToH5=false&newRegistrationPage=true",
+    "url": "https://m.dana.id/n/cashier/new/checkout?bizNo=...",
     "kodeBayar": "3222002005265231"
 }
 ```
@@ -34,49 +34,62 @@ onConsoleMessage: (controller, consoleMessage) {
 // Field yang dibutuhkan:
 String? _activeKodeBayar;
 String? _lastCustomTabUrl;
+int _pollingErrorCount = 0;
 
 void handleConsoleMessage(String message) {
-  // Log semua console message ke debug tracker
-  AppLogger.d("[JS] $message");
+  // Log console message (truncate kalau terlalu panjang)
+  final preview = message.length > 120 ? '${message.substring(0, 120)}...' : message;
+  AppLogger.d("[JS] $preview");
 
-  // Quick-check sebelum JSON parse (optimisasi performa)
+  // Quick-check sebelum JSON parse
   if (!message.contains('finpay_navigation')) return;
+
+  AppLogger.d("[Console] ════════════════════════════════");
+  AppLogger.d("[Console] 📨 Mendeteksi finpay_navigation di console message");
 
   try {
     final Map<String, dynamic> json = jsonDecode(message);
-    if (json['type'] != 'finpay_navigation') return;
+    if (json['type'] != 'finpay_navigation') {
+      AppLogger.d("[Console] ⚠️ JSON valid tapi type='${json['type']}' — bukan finpay_navigation, skip");
+      return;
+    }
 
     final String? url = json['url']?.toString().trim();
     final String? kodeBayar = json['kodeBayar']?.toString().trim();
 
+    AppLogger.d("[Console] ✅ type: finpay_navigation");
+    AppLogger.d("[Console] 🔑 kodeBayar: ${kodeBayar ?? '⚠️ NULL — polling tidak akan berjalan!'}");
+    AppLogger.d("[Console] 🔗 url host: ${url != null ? Uri.tryParse(url)?.host ?? 'parse error' : 'null'}");
+
     if (url == null || url.isEmpty) {
-      AppLogger.d("[Console] finpay_navigation received but URL is empty");
+      AppLogger.d("[Console] ❌ URL kosong — batalkan proses");
+      AppLogger.d("[Console] ════════════════════════════════");
       return;
     }
 
-    AppLogger.d("[Console] finpay_navigation detected");
-    AppLogger.d("[Console] URL: ${_sanitizeUrl(url)}");
-    AppLogger.d("[Console] kodeBayar: ${kodeBayar ?? 'null'}");
-
-    // Simpan kodeBayar untuk polling status
-    _activeKodeBayar = kodeBayar;
-
-    // Validasi URL: hanya https://
+    // Validasi scheme
     final uri = Uri.tryParse(url);
     if (uri == null || uri.scheme != 'https') {
-      AppLogger.d("[Console] Rejected: non-HTTPS URL");
+      AppLogger.d("[Console] ❌ URL ditolak — scheme='${uri?.scheme}', harus https://");
+      AppLogger.d("[Console] ════════════════════════════════");
       return;
     }
 
-    // Simpan URL untuk kemungkinan reopen setelah paymentHold
+    // Simpan state
+    _activeKodeBayar = kodeBayar;
     _lastCustomTabUrl = url;
+    _pollingErrorCount = 0; // reset error counter untuk transaksi baru
 
-    // Buka Custom Tab + mulai polling status
+    AppLogger.d("[Console] → Membuka Custom Tab + memulai polling");
+    AppLogger.d("[Console] ════════════════════════════════");
+
     _webViewController?.stopLoading();
     _openInCustomTabs(url);
 
   } catch (e) {
-    // Bukan JSON valid atau bukan finpay_navigation — abaikan
+    AppLogger.d("[Console] ❌ JSON parse error: $e");
+    AppLogger.d("[Console] Raw message: $message");
+    AppLogger.d("[Console] ════════════════════════════════");
   }
 }
 ```
@@ -103,9 +116,11 @@ late final ChromeSafariBrowser _browser;
 void _initBrowser([ChromeSafariBrowser? browser]) {
   _browser = browser ?? _PaymentChromeBrowser(
     onClosedCallback: () {
-      // User tutup Custom Tab → tampilkan dialog konfirmasi pembatalan.
-      // Jangan langsung notify paymentCompleted; biarkan user memilih.
-      AppLogger.d("[Browser] Custom Tab closed by user — showing hold dialog");
+      AppLogger.d("[Browser] ════════════════════════════════");
+      AppLogger.d("[Browser] 🔴 Custom Tab DITUTUP oleh user");
+      AppLogger.d("[Browser] kodeBayar aktif: ${_activeKodeBayar ?? 'null'}");
+      AppLogger.d("[Browser] → Stop polling + tampilkan dialog konfirmasi");
+      AppLogger.d("[Browser] ════════════════════════════════");
       _stopPaymentStatusPolling();
       _showPaymentHoldDialog();
     },
@@ -118,9 +133,17 @@ void _initBrowser([ChromeSafariBrowser? browser]) {
 ```dart
 Future<void> _openInCustomTabs(String rawUrl) async {
   final uri = Uri.tryParse(rawUrl.trim());
-  if (uri == null) return;
+  if (uri == null) {
+    AppLogger.d("[CustomTab] ❌ URL tidak valid — batal buka Custom Tab");
+    return;
+  }
+  AppLogger.d("[CustomTab] ════════════════════════════════");
+  AppLogger.d("[CustomTab] 🌐 Membuka Custom Tab");
+  AppLogger.d("[CustomTab] host : ${uri.host}");
+  AppLogger.d("[CustomTab] path : ${uri.path}");
   try {
     if (!uri.scheme.startsWith('http')) {
+      AppLogger.d("[CustomTab] scheme non-http ('${uri.scheme}') → launchUrl external");
       await launchUrl(uri, mode: LaunchMode.externalApplication);
       return;
     }
@@ -132,12 +155,11 @@ Future<void> _openInCustomTabs(String rawUrl) async {
         noHistory: false,
       ),
     );
-    AppLogger.d('[Nav] Custom Tab opened — polling payment status');
-
-    // Mulai polling status pembayaran setelah Custom Tab terbuka
+    AppLogger.d("[CustomTab] ✅ Custom Tab berhasil dibuka");
+    AppLogger.d("[CustomTab] ════════════════════════════════");
     _startPaymentStatusPolling();
   } catch (e, stack) {
-    AppLogger.e("Custom Tab error", e, stack);
+    AppLogger.e("[CustomTab] ❌ Gagal buka Custom Tab — fallback ke launchUrl", e, stack);
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 }
@@ -147,7 +169,11 @@ Future<void> _openInCustomTabs(String rawUrl) async {
 
 ```dart
 void _notifyPaymentHold() {
-  AppLogger.d("[Payment] Dispatching 'paymentHold' event to PKB");
+  AppLogger.d("[Payment] ════════════════════════════════");
+  AppLogger.d("[Payment] 🔴 DISPATCH event 'paymentHold' ke PKB");
+  AppLogger.d("[Payment] kodeBayar: ${_activeKodeBayar ?? 'null'}");
+  AppLogger.d("[Payment] PKB diharapkan hit API pembatalan setelah ini");
+  AppLogger.d("[Payment] ════════════════════════════════");
   _webViewController?.evaluateJavascript(
     source: "window.dispatchEvent(new CustomEvent('paymentHold', "
             "{detail:{ts:Date.now(), kodeBayar:'${_activeKodeBayar ?? ''}'}}));",
@@ -177,17 +203,12 @@ void _showPaymentHoldDialog() {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text(
         'Konfirmasi Pembatalan Transaksi',
-        style: TextStyle(
-          fontSize: 18,
-          fontWeight: FontWeight.bold,
-          color: Color(0xFF1B5E20),
-        ),
+        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF1B5E20)),
       ),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Info kode bayar
           if (_activeKodeBayar != null && _activeKodeBayar!.isNotEmpty)
             Container(
               width: double.infinity,
@@ -200,18 +221,9 @@ void _showPaymentHoldDialog() {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Kode Bayar',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
-                  ),
+                  const Text('Kode Bayar', style: TextStyle(fontSize: 12, color: Colors.grey)),
                   const SizedBox(height: 4),
-                  Text(
-                    _activeKodeBayar!,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+                  Text(_activeKodeBayar!, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 ],
               ),
             ),
@@ -223,36 +235,25 @@ void _showPaymentHoldDialog() {
         ],
       ),
       actions: [
-        // Tombol "Lanjutkan Bayar" → reopen Custom Tab
         TextButton(
           onPressed: () {
             Navigator.of(dialogCtx).pop();
             _reopenCustomTab();
           },
-          child: const Text(
-            'Lanjutkan Bayar',
-            style: TextStyle(
-              color: Color(0xFF1B5E20),
-              fontWeight: FontWeight.w600,
-            ),
-          ),
+          child: const Text('Lanjutkan Bayar',
+            style: TextStyle(color: Color(0xFF1B5E20), fontWeight: FontWeight.w600)),
         ),
-        // Tombol "Batalkan Transaksi" → kirim paymentHold event
         ElevatedButton(
           onPressed: () {
             Navigator.of(dialogCtx).pop();
             AppLogger.d("[Payment] User confirmed cancellation — sending paymentHold");
             _notifyPaymentHold();
-            // Bersihkan state pembayaran
             _activeKodeBayar = null;
             _lastCustomTabUrl = null;
           },
           style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.red[700],
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
-            ),
+            backgroundColor: Colors.red[700], foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           ),
           child: const Text('Batalkan Transaksi'),
         ),
@@ -261,8 +262,6 @@ void _showPaymentHoldDialog() {
   );
 }
 
-/// Membuka kembali Custom Tab dengan URL terakhir.
-/// Dipanggil saat user memilih "Lanjutkan Bayar" di dialog paymentHold.
 void _reopenCustomTab() {
   if (_lastCustomTabUrl == null || _lastCustomTabUrl!.isEmpty) {
     AppLogger.d("[Payment] No stored URL to reopen Custom Tab");
@@ -301,7 +300,7 @@ Content-Type: application/json
 }
 ```
 
-### Snippet — Polling + Check Status:
+### Snippet — Polling + Check Status (dengan debug log):
 
 ```dart
 // Field yang dibutuhkan:
@@ -309,15 +308,21 @@ Timer? _paymentStatusPoller;
 bool _isPollingPayment = false;
 String? _activeKodeBayar;
 bool _paymentNotified = false;
+int _pollingErrorCount = 0;
+static const int _maxPollingErrorLog = 3;
 
 void _startPaymentStatusPolling() {
   if (_activeKodeBayar == null || _activeKodeBayar!.isEmpty) {
-    AppLogger.d("[Polling] No active kodeBayar — skip polling");
+    AppLogger.d("[Polling] ⚠️ Tidak ada kodeBayar — polling tidak dimulai");
     return;
   }
 
   _stopPaymentStatusPolling();
-  AppLogger.d("[Polling] Started — kodeBayar: $_activeKodeBayar (interval: 3s)");
+  _pollingErrorCount = 0;
+  AppLogger.d("[Polling] ▶️ Polling DIMULAI");
+  AppLogger.d("[Polling] kodeBayar : $_activeKodeBayar");
+  AppLogger.d("[Polling] interval  : 3 detik");
+  AppLogger.d("[Polling] endpoint  : http://192.168.99.46:8700/api/check-dummy-payment-status");
 
   _paymentStatusPoller = Timer.periodic(const Duration(seconds: 3), (_) {
     _checkPaymentStatus();
@@ -325,6 +330,9 @@ void _startPaymentStatusPolling() {
 }
 
 void _stopPaymentStatusPolling() {
+  if (_paymentStatusPoller != null) {
+    AppLogger.d("[Polling] ⏹️ Polling DIHENTIKAN");
+  }
   _paymentStatusPoller?.cancel();
   _paymentStatusPoller = null;
   _isPollingPayment = false;
@@ -339,42 +347,68 @@ Future<void> _checkPaymentStatus() async {
 
   _isPollingPayment = true;
   try {
-    final url = Uri.parse('http://192.168.99.46:8700/api/check-dummy-payment-status');
-    final response = await http.post(
-      url,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'kodeBayar': _activeKodeBayar}),
-    );
+    final endpoint = Uri.parse('http://192.168.99.46:8700/api/check-dummy-payment-status');
+    final requestBody = jsonEncode({'kodeBayar': _activeKodeBayar});
+
+    AppLogger.d("[Polling] 🔄 POST $endpoint");
+    AppLogger.d("[Polling] Request body: $requestBody");
+
+    final response = await http
+        .post(
+          endpoint,
+          headers: {'Content-Type': 'application/json'},
+          body: requestBody,
+        )
+        .timeout(
+          const Duration(seconds: 5),
+          onTimeout: () => throw Exception(
+            'Request timeout setelah 5 detik — pastikan device dan server di WiFi yang sama'),
+        );
+
+    AppLogger.d("[Polling] Response status : ${response.statusCode}");
+    AppLogger.d("[Polling] Response body   : ${response.body}");
 
     if (response.statusCode == 200) {
       final Map<String, dynamic> body = jsonDecode(response.body);
-      // Cek apakah status pembayaran sudah true
       final bool isPaid = body['data']?['status'] == true ||
                           body['data']?['is_paid'] == true ||
-                          body['success'] == true && body['data']?['status_payment'] == true;
+                          (body['success'] == true && body['data']?['status_payment'] == true);
+
+      AppLogger.d("[Polling] isPaid: $isPaid");
+      _pollingErrorCount = 0; // reset karena request berhasil
 
       if (isPaid) {
-        AppLogger.d("[Polling] Payment status: PAID ✅ — closing Custom Tab");
+        AppLogger.d("[Polling] ════════════════════════════════");
+        AppLogger.d("[Polling] 💰 Status LUNAS — menutup Custom Tab otomatis");
+        AppLogger.d("[Polling] ════════════════════════════════");
         _stopPaymentStatusPolling();
-
-        // Reset flag agar bisa dispatch
         _paymentNotified = false;
         _notifyPaymentCompleted();
-
-        // Tutup Custom Tab otomatis
         if (_browser.isOpened()) {
+          AppLogger.d("[Polling] 🔒 Menutup Custom Tab...");
           await _browser.close();
         }
-
-        // Bersihkan state
         _activeKodeBayar = null;
         _lastCustomTabUrl = null;
         return;
+      } else {
+        AppLogger.d("[Polling] ⏳ Status belum lunas — lanjut polling");
+      }
+    } else {
+      AppLogger.d("[Polling] ⚠️ HTTP ${response.statusCode} — response tidak 200");
+    }
+  } catch (e) {
+    _pollingErrorCount++;
+    // Log error hanya N kali pertama — agar tidak spam log
+    if (_pollingErrorCount <= _maxPollingErrorLog) {
+      AppLogger.d("[Polling] Error ke-$_pollingErrorCount/$_maxPollingErrorLog: $e");
+      if (_pollingErrorCount == 1) {
+        AppLogger.d("[Polling] 💡 Cek: device & PC di WiFi yang sama? Server jalan di 192.168.99.46:8700?");
+      }
+      if (_pollingErrorCount == _maxPollingErrorLog) {
+        AppLogger.d("[Polling] 🔕 Error log disuppress — server tidak reachable. Polling tetap berjalan.");
       }
     }
-  } catch (e, stack) {
-    // Silent fail — server mungkin tidak reachable
-    AppLogger.e("[Polling] check-dummy-payment-status error", e, stack);
   } finally {
     _isPollingPayment = false;
   }
@@ -386,18 +420,48 @@ Future<void> _checkPaymentStatus() async {
 ```dart
 void _notifyPaymentCompleted() {
   if (_paymentNotified) {
-    AppLogger.d("[Payment] Already notified — skipping duplicate dispatch");
+    AppLogger.d("[Payment] ⚠️ Duplicate dispatch dicegah — sudah dikirim dalam 3 detik terakhir");
     return;
   }
   _paymentNotified = true;
-  AppLogger.d("[Payment] Dispatching 'paymentCompleted' event");
+  AppLogger.d("[Payment] ════════════════════════════════");
+  AppLogger.d("[Payment] ✅ DISPATCH event 'paymentCompleted' ke PKB");
+  AppLogger.d("[Payment] ════════════════════════════════");
   _webViewController?.evaluateJavascript(
     source: "window.dispatchEvent(new CustomEvent('paymentCompleted', "
             "{detail:{ts:Date.now()}}));",
   );
-  // Auto-reset flag setelah 3 detik agar bisa handle transaksi berikutnya
   Future.delayed(const Duration(seconds: 3), () => _paymentNotified = false);
 }
+```
+
+### Contoh Output Debug saat Polling:
+
+```
+[Polling] ▶️ Polling DIMULAI
+[Polling] kodeBayar : 3222002005265231
+[Polling] interval  : 3 detik
+[Polling] endpoint  : http://192.168.99.46:8700/api/check-dummy-payment-status
+[Polling] 🔄 POST http://192.168.99.46:8700/api/check-dummy-payment-status
+[Polling] Request body: {"kodeBayar":"3222002005265231"}
+[Polling] Response status : 200
+[Polling] Response body   : {"success":true,"data":{"status_payment":false}}
+[Polling] isPaid: false
+[Polling] ⏳ Status belum lunas — lanjut polling
+...
+[Polling] 🔄 POST http://192.168.99.46:8700/api/check-dummy-payment-status
+[Polling] Request body: {"kodeBayar":"3222002005265231"}
+[Polling] Response status : 200
+[Polling] Response body   : {"success":true,"data":{"status_payment":true}}
+[Polling] isPaid: true
+[Polling] ════════════════════════════════
+[Polling] 💰 Status LUNAS — menutup Custom Tab otomatis
+[Polling] ════════════════════════════════
+[Polling] ⏹️ Polling DIHENTIKAN
+[Payment] ════════════════════════════════
+[Payment] ✅ DISPATCH event 'paymentCompleted' ke PKB
+[Payment] ════════════════════════════════
+[Polling] 🔒 Menutup Custom Tab...
 ```
 
 ### Kapan Polling Berhenti:

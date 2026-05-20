@@ -1,9 +1,11 @@
 # Panduan Integrasi Host App — PKB WebView Payment
 > **Untuk:** Tim pengembang host app (aplikasi native yang mem-wrap PKB sebagai WebView)
-> **Versi:** 2026-05-20 (v2 — Console Handler + API Polling + paymentHold)
+> **Versi:** 2026-05-20 (v2.1 — Enhanced Debug Logging + 5s Timeout + Error Suppression)
 > **Kontak PKB:** *(isi nama/email tim PKB)*
+> **Snippet siap copy-paste:** Lihat `snippet_documentation.md` untuk kode terbaru yang bisa langsung dipakai.
 
 ---
+
 
 ## Gambaran Umum
 

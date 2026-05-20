@@ -262,7 +262,8 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
   );
 
-  void addDebugLog(String message) => AppLogger.d(message);
+
+
 
   // ── CONSOLE MESSAGE HANDLER ──────────────────────────────────────────────
   // Primary handler: intercept console.log JSON dari WebView PKB.
