@@ -14,7 +14,7 @@ dependencies:
   permission_handler: ^11.3.1
   url_launcher: ^6.3.1
   app_links: ^6.3.2
-  http: ^1.2.2
+  dio: ^5.7.0
 
 dev_dependencies:
   flutter_test:

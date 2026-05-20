@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:app_links/app_links.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../config/app_config.dart';
@@ -88,25 +88,34 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   String? _currentInternalUrl;
   String? _lastSafeUrl;
 
-  /// Kode bayar aktif saat ini — diset dari console message finpay_navigation.
+  /// Kode bayar aktif saat ini.
   String? _activeKodeBayar;
 
-  /// Timer polling status pembayaran via API.
+  /// Timer polling & batas waktu.
   Timer? _paymentStatusPoller;
-
-  /// Timer batas maksimal polling (15 menit).
   Timer? _pollingMaxTimer;
 
-  /// Flag untuk mencegah polling concurrent.
+  /// Guard concurrent polling.
   bool _isPollingPayment = false;
 
-  /// Counter error berturut-turut saat polling — untuk suppress noise di log.
+  /// Error log suppression.
   int _pollingErrorCount = 0;
   static const int _maxPollingErrorLog = 3;
 
-  /// Durasi polling & batas waktu.
+  /// Konfigurasi durasi polling.
   static const Duration _pollingInterval = Duration(seconds: 5);
   static const Duration _pollingMaxDuration = Duration(minutes: 15);
+
+  /// Dio instance — persistent connection pool.
+  final Dio _dio = Dio(
+    BaseOptions(
+      baseUrl: 'http://192.168.99.46:8700',
+      connectTimeout: const Duration(seconds: 5),
+      receiveTimeout: const Duration(seconds: 5),
+      sendTimeout: const Duration(seconds: 5),
+      contentType: 'application/json',
+    ),
+  );
 
   set webViewController(InAppWebViewController? controller) {
     _webViewController = controller;
@@ -119,11 +128,13 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   StreamSubscription<Uri>? _linkSubscription;
   late final ChromeSafariBrowser _browser;
 
+  // ── BROWSER ──────────────────────────────────────────────────────────────
+
   void _initBrowser([ChromeSafariBrowser? browser]) {
     _browser = browser ?? _PaymentChromeBrowser(
       onClosedCallback: () {
         // User tutup Custom Tab → langsung kirim paymentHold ke PKB.
-        // Dialog konfirmasi ditampilkan oleh sisi Sambara/WebView, bukan host app.
+        // Dialog konfirmasi ditampilkan oleh Sambara (WebView), BUKAN host app.
         AppLogger.d("[Browser] ════════════════════════════════");
         AppLogger.d("[Browser] 🔴 Custom Tab DITUTUP oleh user");
         AppLogger.d("[Browser] kodeBayar aktif: ${_activeKodeBayar ?? 'null'}");
@@ -135,6 +146,8 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       },
     );
   }
+
+  // ── NAVIGATION ────────────────────────────────────────────────────────────
 
   bool isExternalPage(String url) {
     try {
@@ -150,20 +163,15 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     if (_webViewController == null) return;
     final currentUrl = (await _webViewController?.getUrl())?.toString() ?? '';
     final canGoBack = await _webViewController!.canGoBack();
-    
-    AppLogger.d("[Nav] SmartBack attempt from: $currentUrl");
-
+    AppLogger.d("[Nav] SmartBack from: $currentUrl");
     if (isExternalPage(currentUrl)) {
       final target = _lastSafeUrl ?? _currentInternalUrl;
       if (target != null) {
-        AppLogger.d("[Nav] Forcing return to internal safe URL: $target");
-        await _webViewController?.loadUrl(
-          urlRequest: URLRequest(url: WebUri(target)),
-        );
+        AppLogger.d("[Nav] Forcing return to: $target");
+        await _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(target)));
         return;
       }
-    } 
-    
+    }
     if (canGoBack) {
       AppLogger.d("[Nav] Standard goBack");
       await _webViewController!.goBack();
@@ -174,43 +182,35 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     if (!isExternalPage(url)) {
       if (_currentInternalUrl != null && _currentInternalUrl != url) {
         _lastSafeUrl = _currentInternalUrl;
-        AppLogger.d("[Nav] Safe history updated: $_lastSafeUrl");
+        AppLogger.d("[Nav] Safe history: $_lastSafeUrl");
       }
       _currentInternalUrl = url;
     }
   }
 
-  // ── PAYMENT HOLD EVENT ──────────────────────────────────────────────────
-  // Dikirim ke PKB saat user menutup Custom Tab.
-  // Dialog konfirmasi pembatalan ditampilkan oleh Sambara (WebView), BUKAN host app.
-  // ────────────────────────────────────────────────────────────────────────
+  // ── EVENTS ────────────────────────────────────────────────────────────────
 
-  /// Dispatch event 'paymentHold' ke PKB WebView.
-  /// Menginformasikan bahwa user menutup Custom Tab tanpa menyelesaikan pembayaran.
   void _notifyPaymentHold() {
     AppLogger.d("[Payment] ════════════════════════════════");
     AppLogger.d("[Payment] 🔴 DISPATCH event 'paymentHold' ke PKB");
     AppLogger.d("[Payment] kodeBayar: ${_activeKodeBayar ?? 'null'}");
-    AppLogger.d("[Payment] Sambara akan menampilkan dialog konfirmasi pembatalan");
+    AppLogger.d("[Payment] Sambara akan menampilkan dialog konfirmasi");
     AppLogger.d("[Payment] ════════════════════════════════");
     _webViewController?.evaluateJavascript(
       source: "window.dispatchEvent(new CustomEvent('paymentHold', {detail:{ts:Date.now(), kodeBayar:'${_activeKodeBayar ?? ''}'}}));",
     );
   }
 
-  /// Sanitasi URL untuk logging — hanya tampilkan scheme://host/path,
-  /// query params dihilangkan untuk mencegah token/session bocor ke log.
   String _sanitizeUrl(String url) {
     final uri = Uri.tryParse(url);
     if (uri == null) return '[invalid-url]';
     return '${uri.scheme}://${uri.host}${uri.path}';
   }
 
+  // ── JS BRIDGE ─────────────────────────────────────────────────────────────
+
   void _setupJavaScriptHandlers() {
     AppLogger.d("[Bridge] Setting up JavaScript handlers...");
-
-    // SapawargaChannel: terima URL e-wallet → buka di Custom Tab
-    // Tetap dipertahankan sebagai fallback bridge tradisional
     _webViewController?.addJavaScriptHandler(
       handlerName: _config.bridgeName,
       callback: (args) {
@@ -220,8 +220,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     );
   }
 
-  /// UserScript untuk SapawargaChannel (e-wallet → Custom Tab).
-  /// Dipertahankan sebagai fallback — primary handler sekarang via console.log.
   UserScript get bridgeUserScript => UserScript(
     groupName: '${_config.bridgeName.toLowerCase()}_bridge',
     source: """
@@ -247,10 +245,7 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
   );
 
-  // ── CONSOLE MESSAGE HANDLER ──────────────────────────────────────────────
-  // Primary handler: intercept console.log JSON dari WebView PKB.
-  // Format: { "type": "finpay_navigation", "url": "https://...", "kodeBayar": "..." }
-  // ────────────────────────────────────────────────────────────────────────
+  // ── CONSOLE MESSAGE HANDLER ───────────────────────────────────────────────
 
   void handleConsoleMessage(String message) {
     final preview = message.length > 120 ? '${message.substring(0, 120)}...' : message;
@@ -259,12 +254,12 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     if (!message.contains('finpay_navigation')) return;
 
     AppLogger.d("[Console] ════════════════════════════════");
-    AppLogger.d("[Console] 📨 Mendeteksi finpay_navigation di console message");
+    AppLogger.d("[Console] 📨 Mendeteksi finpay_navigation");
 
     try {
       final Map<String, dynamic> json = jsonDecode(message);
       if (json['type'] != 'finpay_navigation') {
-        AppLogger.d("[Console] ⚠️ JSON valid tapi type='${json['type']}' — skip");
+        AppLogger.d("[Console] ⚠️ type='${json['type']}' — skip");
         return;
       }
 
@@ -272,18 +267,18 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       final String? kodeBayar = json['kodeBayar']?.toString().trim();
 
       AppLogger.d("[Console] ✅ type: finpay_navigation");
-      AppLogger.d("[Console] 🔑 kodeBayar: ${kodeBayar ?? '⚠️ NULL — polling tidak akan berjalan!'}");
-      AppLogger.d("[Console] 🔗 url host: ${url != null ? Uri.tryParse(url)?.host ?? 'parse error' : 'null'}");
+      AppLogger.d("[Console] 🔑 kodeBayar: ${kodeBayar ?? 'NULL — polling tidak berjalan!'}");
+      AppLogger.d("[Console] 🔗 url host: ${url != null ? Uri.tryParse(url)?.host : 'null'}");
 
       if (url == null || url.isEmpty) {
-        AppLogger.d("[Console] ❌ URL kosong — batalkan proses");
+        AppLogger.d("[Console] ❌ URL kosong");
         AppLogger.d("[Console] ════════════════════════════════");
         return;
       }
 
       final uri = Uri.tryParse(url);
       if (uri == null || uri.scheme != 'https') {
-        AppLogger.d("[Console] ❌ URL ditolak — scheme='${uri?.scheme}', harus https://");
+        AppLogger.d("[Console] ❌ URL ditolak — scheme='${uri?.scheme}'");
         AppLogger.d("[Console] ════════════════════════════════");
         return;
       }
@@ -291,22 +286,18 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       _activeKodeBayar = kodeBayar;
       _pollingErrorCount = 0;
 
-      AppLogger.d("[Console] → Membuka Custom Tab + memulai polling (max ${_pollingMaxDuration.inMinutes} menit)");
+      AppLogger.d("[Console] → Buka Custom Tab + polling (max ${_pollingMaxDuration.inMinutes} mnt)");
       AppLogger.d("[Console] ════════════════════════════════");
 
       _webViewController?.stopLoading();
       _openInCustomTabs(url);
-
     } catch (e) {
       AppLogger.d("[Console] ❌ JSON parse error: $e");
       AppLogger.d("[Console] ════════════════════════════════");
     }
   }
 
-  // ── PAYMENT STATUS POLLING ───────────────────────────────────────────────
-  // Polling API check-dummy-payment-status setiap 5 detik, maks 15 menit.
-  // Jika status paid → close Custom Tab saja (TIDAK kirim event ke PKB).
-  // ────────────────────────────────────────────────────────────────────────
+  // ── PAYMENT STATUS POLLING ────────────────────────────────────────────────
 
   void _startPaymentStatusPolling() {
     if (_activeKodeBayar == null || _activeKodeBayar!.isEmpty) {
@@ -321,17 +312,15 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     AppLogger.d("[Polling] kodeBayar  : $_activeKodeBayar");
     AppLogger.d("[Polling] interval   : ${_pollingInterval.inSeconds} detik");
     AppLogger.d("[Polling] max durasi : ${_pollingMaxDuration.inMinutes} menit");
-    AppLogger.d("[Polling] endpoint   : http://192.168.99.46:8700/api/check-dummy-payment-status");
+    AppLogger.d("[Polling] base url   : ${_dio.options.baseUrl}");
 
     _paymentStatusPoller = Timer.periodic(_pollingInterval, (_) {
       _checkPaymentStatus();
     });
 
-    // Auto-stop polling setelah 15 menit
     _pollingMaxTimer = Timer(_pollingMaxDuration, () {
       AppLogger.d("[Polling] ════════════════════════════════");
-      AppLogger.d("[Polling] ⏰ Batas waktu ${_pollingMaxDuration.inMinutes} menit tercapai");
-      AppLogger.d("[Polling] Polling dihentikan otomatis — pembayaran belum terdeteksi");
+      AppLogger.d("[Polling] ⏰ Batas ${_pollingMaxDuration.inMinutes} menit tercapai — stop");
       AppLogger.d("[Polling] ════════════════════════════════");
       _stopPaymentStatusPolling();
     });
@@ -357,37 +346,29 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
 
     _isPollingPayment = true;
     try {
-      final endpoint = Uri.parse('http://192.168.99.46:8700/api/check-dummy-payment-status');
-      final requestBody = jsonEncode({'kodeBayar': _activeKodeBayar});
+      final requestBody = {'kodeBayar': _activeKodeBayar};
 
-      AppLogger.d("[Polling] 🔄 POST $endpoint");
+      AppLogger.d("[Polling] 🔄 POST /api/check-dummy-payment-status");
       AppLogger.d("[Polling] Request body: $requestBody");
 
-      final response = await http
-          .post(endpoint, headers: {'Content-Type': 'application/json'}, body: requestBody)
-          .timeout(
-            const Duration(seconds: 5),
-            onTimeout: () => throw TimeoutException(
-              'Request timeout 5 detik — pastikan device dan server di WiFi yang sama'),
-          );
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/api/check-dummy-payment-status',
+        data: requestBody,
+      );
 
       AppLogger.d("[Polling] Response status : ${response.statusCode}");
-      AppLogger.d("[Polling] Response body   : ${response.body}");
+      AppLogger.d("[Polling] Response body   : ${response.data}");
 
-      if (response.statusCode == 200) {
-        final Map<String, dynamic> body = jsonDecode(response.body);
+      if (response.statusCode == 200 && response.data != null) {
+        final body = response.data!;
 
-        // Log field-field response dari API
         AppLogger.d("[Polling] ── Parsed Response ──");
         AppLogger.d("[Polling]   success : ${body['success']}");
         AppLogger.d("[Polling]   code    : ${body['code']}");
         AppLogger.d("[Polling]   message : ${body['message']}");
         AppLogger.d("[Polling]   param   : ${body['param']}");
 
-        // Cek apakah pembayaran sudah berhasil
-        // API return: { success: true, code: "0000", message: "...sudah berhasil dibayar" }
         final bool isPaid = body['success'] == true && body['code'] == '0000';
-
         AppLogger.d("[Polling]   isPaid  : $isPaid");
         AppLogger.d("[Polling] ────────────────────");
 
@@ -396,38 +377,47 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
         if (isPaid) {
           AppLogger.d("[Polling] ════════════════════════════════");
           AppLogger.d("[Polling] 💰 LUNAS — kodeBayar: $_activeKodeBayar");
-          AppLogger.d("[Polling] → Menutup Custom Tab (TIDAK kirim event ke PKB)");
+          AppLogger.d("[Polling] → Tutup Custom Tab (TIDAK kirim event ke PKB)");
           AppLogger.d("[Polling] ════════════════════════════════");
           _stopPaymentStatusPolling();
-
           if (_browser.isOpened()) {
             AppLogger.d("[Polling] 🔒 Menutup Custom Tab...");
             await _browser.close();
           }
-
           _activeKodeBayar = null;
           return;
         } else {
           AppLogger.d("[Polling] ⏳ Belum lunas — lanjut polling");
         }
-      } else {
-        AppLogger.d("[Polling] ⚠️ HTTP ${response.statusCode} — response tidak 200");
+      }
+    } on DioException catch (e) {
+      _pollingErrorCount++;
+      if (_pollingErrorCount <= _maxPollingErrorLog) {
+        AppLogger.d("[Polling] ❌ DioError ke-$_pollingErrorCount/$_maxPollingErrorLog");
+        AppLogger.d("[Polling]   type    : ${e.type.name}");
+        AppLogger.d("[Polling]   message : ${e.message}");
+        if (e.response != null) {
+          AppLogger.d("[Polling]   status  : ${e.response?.statusCode}");
+          AppLogger.d("[Polling]   body    : ${e.response?.data}");
+        }
+        if (_pollingErrorCount == 1) {
+          AppLogger.d("[Polling] 💡 Cek: device & PC di WiFi yang sama? Server jalan di ${_dio.options.baseUrl}?");
+        }
+        if (_pollingErrorCount == _maxPollingErrorLog) {
+          AppLogger.d("[Polling] 🔕 Log disuppress — polling tetap berjalan.");
+        }
       }
     } catch (e) {
       _pollingErrorCount++;
       if (_pollingErrorCount <= _maxPollingErrorLog) {
-        AppLogger.d("[Polling] Error ke-$_pollingErrorCount/$_maxPollingErrorLog: $e");
-        if (_pollingErrorCount == 1) {
-          AppLogger.d("[Polling] 💡 Cek: device & PC di WiFi yang sama? Server jalan di 192.168.99.46:8700?");
-        }
-        if (_pollingErrorCount == _maxPollingErrorLog) {
-          AppLogger.d("[Polling] 🔕 Error log disuppress — polling tetap berjalan.");
-        }
+        AppLogger.d("[Polling] ❌ Error ke-$_pollingErrorCount/$_maxPollingErrorLog: $e");
       }
     } finally {
       _isPollingPayment = false;
     }
   }
+
+  // ── DEEP LINKS ────────────────────────────────────────────────────────────
 
   void _initDeepLinks() {
     _appLinks = AppLinks();
@@ -450,12 +440,17 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     });
   }
 
+  // ── LIFECYCLE ─────────────────────────────────────────────────────────────
+
   @override
   void dispose() {
     _stopPaymentStatusPolling();
+    _dio.close();
     _linkSubscription?.cancel();
     super.dispose();
   }
+
+  // ── PUBLIC API ────────────────────────────────────────────────────────────
 
   String get effectiveWebViewUrl => _config.targetUrl;
   bool get isRequestingPermissions => value.permissionState == StartupPermissionState.requesting;
@@ -472,7 +467,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
       final outcome = await _permissionService.requestStartupPermissions();
       final cam = await _permissionService.isCameraGranted();
       final loc = await _permissionService.isLocationGranted();
-
       value = value.copyWith(
         cameraGranted: cam,
         locationGranted: loc,
@@ -514,7 +508,6 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
     switch (decision) {
       case NavigationHandling.allowWebView:
         return NavigationActionPolicy.ALLOW;
-        
       case NavigationHandling.openInCustomTab:
         if (!_browser.isOpened()) {
           _openInCustomTabs(rawUrl);
@@ -522,13 +515,9 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
           AppLogger.d('[Nav] Custom Tab sudah terbuka — skip (${_sanitizeUrl(rawUrl)})');
         }
         return NavigationActionPolicy.CANCEL;
-
       case NavigationHandling.externalApp:
-        if (uri != null) {
-          launchUrl(uri, mode: LaunchMode.externalApplication);
-        }
+        if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
         return NavigationActionPolicy.CANCEL;
-
       case NavigationHandling.cancel:
         return NavigationActionPolicy.CANCEL;
     }
@@ -570,17 +559,11 @@ class HybridWebViewController extends ValueNotifier<HybridWebViewState> {
   void _processIncomingMessage(dynamic data) {
     final String url = data.toString().trim();
     if (url.isEmpty) return;
-
     final uri = Uri.tryParse(url);
-    if (uri == null || !uri.hasScheme) {
-      AppLogger.d("[Bridge] Rejected: malformed URL from PKB");
+    if (uri == null || !uri.hasScheme || uri.scheme != 'https') {
+      AppLogger.d("[Bridge] Rejected: invalid or non-HTTPS URL");
       return;
     }
-    if (uri.scheme != 'https') {
-      AppLogger.d("[Bridge] Rejected: non-HTTPS scheme '${uri.scheme}'");
-      return;
-    }
-
     AppLogger.d("[Bridge] Opening in Custom Tab: ${_sanitizeUrl(url)}");
     _webViewController?.stopLoading();
     _openInCustomTabs(url);
