@@ -54,8 +54,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
     // Hal ini menjamin konteks UI siap sebelum dialog sistem muncul.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _controller.requestStartupPermissions();
-      // Set dialog context agar controller bisa menampilkan dialog paymentHold
-      _controller.dialogContext = context;
     });
   }
 
@@ -68,8 +66,6 @@ class _HybridWebViewPageState extends State<HybridWebViewPage> {
 
   @override
   Widget build(BuildContext context) {
-    // Update dialog context setiap build (context bisa berubah)
-    _controller.dialogContext = context;
 
     // Mendengarkan perubahan state dari controller secara reaktif menggunakan ValueListenableBuilder.
     return ValueListenableBuilder<HybridWebViewState>(
